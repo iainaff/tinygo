@@ -4,6 +4,7 @@ matrix:
   include:
   - dist: xenial
     go: "1.11"
+    node_js: "10.15"
 
 addons:
   apt:
@@ -15,6 +16,7 @@ addons:
     - llvm-7-dev
     - clang-7
     - libclang-7-dev
+    - lld-7
     - binutils-arm-none-eabi
     - qemu-system-arm
     - gcc-avr
