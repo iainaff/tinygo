@@ -66,6 +66,9 @@ reflect type: unsafe.Pointer
 reflect type: chan
   chan: int
   nil: true
+reflect type: chan
+  chan: int
+  nil: true
 reflect type: ptr
   pointer: true int
   nil: false
@@ -82,7 +85,12 @@ reflect type: ptr
   nil: false
   reflect type: int settable=true
     int: 42
-reflect type: slice
+reflect type: ptr
+  pointer: true int
+  nil: false
+  reflect type: int settable=true
+    int: 0
+reflect type: slice comparable=false
   slice: uint8 3 3
   pointer: true
   nil: false
@@ -95,7 +103,7 @@ reflect type: slice
   indexing: 2
   reflect type: uint8 settable=true
     uint: 3
-reflect type: slice
+reflect type: slice comparable=false
   slice: uint8 2 5
   pointer: true
   nil: false
@@ -105,7 +113,7 @@ reflect type: slice
   indexing: 1
   reflect type: uint8 settable=true
     uint: 0
-reflect type: slice
+reflect type: slice comparable=false
   slice: int32 2 2
   pointer: true
   nil: false
@@ -115,7 +123,7 @@ reflect type: slice
   indexing: 1
   reflect type: int32 settable=true
     int: 5
-reflect type: slice
+reflect type: slice comparable=false
   slice: string 2 2
   pointer: true
   nil: false
@@ -133,15 +141,15 @@ reflect type: slice
     string: Z 1
     reflect type: uint8
       uint: 90
-reflect type: slice
+reflect type: slice comparable=false
   slice: uint8 0 0
   pointer: false
   nil: true
-reflect type: slice
+reflect type: slice comparable=false
   slice: uint8 0 0
   pointer: true
   nil: false
-reflect type: slice
+reflect type: slice comparable=false
   slice: float32 2 2
   pointer: true
   nil: false
@@ -151,7 +159,7 @@ reflect type: slice
   indexing: 1
   reflect type: float32 settable=true
     float: +1.320000e+000
-reflect type: slice
+reflect type: slice comparable=false
   slice: float64 2 2
   pointer: true
   nil: false
@@ -161,7 +169,7 @@ reflect type: slice
   indexing: 1
   reflect type: float64 settable=true
     float: +1.640000e+000
-reflect type: slice
+reflect type: slice comparable=false
   slice: complex64 2 2
   pointer: true
   nil: false
@@ -171,7 +179,7 @@ reflect type: slice
   indexing: 1
   reflect type: complex64 settable=true
     complex: (+1.640000e+000+3.000000e-001i)
-reflect type: slice
+reflect type: slice comparable=false
   slice: complex128 2 2
   pointer: true
   nil: false
@@ -181,35 +189,150 @@ reflect type: slice
   indexing: 1
   reflect type: complex128 settable=true
     complex: (+1.128000e+000+4.000000e-001i)
+reflect type: slice comparable=false
+  slice: uint8 3 3
+  pointer: true
+  nil: false
+  indexing: 0
+  reflect type: uint8 settable=true
+    uint: 5
+  indexing: 1
+  reflect type: uint8 settable=true
+    uint: 3
+  indexing: 2
+  reflect type: uint8 settable=true
+    uint: 11
 reflect type: array
-  array
-reflect type: func
+  array: 3 int64 24
+  reflect type: int64
+    int: 5
+  reflect type: int64
+    int: 8
+  reflect type: int64
+    int: 2
+reflect type: array
+  array: 2 uint8 2
+  reflect type: uint8
+    uint: 3
+  reflect type: uint8
+    uint: 5
+reflect type: func comparable=false
   func
   nil: true
-reflect type: func
+reflect type: func comparable=false
   func
   nil: false
-reflect type: map
+reflect type: map comparable=false
   map
   nil: true
-reflect type: map
+reflect type: map comparable=false
   map
   nil: false
 reflect type: struct
-  struct
+  struct: 0
 reflect type: struct
-  struct
+  struct: 1
+  field: 0 error
+  tag: 
+  embedded: true
+  reflect type: interface
+    interface
+    nil: true
+reflect type: struct
+  struct: 3
+  field: 0 a
+  tag: 
+  embedded: false
+  reflect type: uint8
+    uint: 42
+  field: 1 b
+  tag: 
+  embedded: false
+  reflect type: int16
+    int: 321
+  field: 2 c
+  tag: 
+  embedded: false
+  reflect type: int8
+    int: 123
+reflect type: struct comparable=false
+  struct: 5
+  field: 0 n
+  tag: foo:"bar"
+  embedded: false
+  reflect type: int
+    int: 5
+  field: 1 some
+  tag: 
+  embedded: false
+  reflect type: struct
+    struct: 2
+    field: 0 X
+    tag: 
+    embedded: false
+    reflect type: int16
+      int: -5
+    field: 1 Y
+    tag: 
+    embedded: false
+    reflect type: int16
+      int: 3
+  field: 2 zero
+  tag: 
+  embedded: false
+  reflect type: struct
+    struct: 0
+  field: 3 buf
+  tag: 
+  embedded: false
+  reflect type: slice comparable=false
+    slice: uint8 2 2
+    pointer: true
+    nil: false
+    indexing: 0
+    reflect type: uint8
+      uint: 71
+    indexing: 1
+    reflect type: uint8
+      uint: 111
+  field: 4 Buf
+  tag: 
+  embedded: false
+  reflect type: slice comparable=false
+    slice: uint8 1 1
+    pointer: true
+    nil: false
+    indexing: 0
+    reflect type: uint8 settable=true
+      uint: 88
+reflect type: ptr
+  pointer: true struct
+  nil: false
+  reflect type: struct settable=true
+    struct: 2
+    field: 0 next
+    tag: description:"chain"
+    embedded: false
+    reflect type: ptr
+      pointer: false struct
+      nil: true
+    field: 1 foo
+    tag: 
+    embedded: false
+    reflect type: int
+      int: 42
 
 sizes:
-int8 1
-int16 2
-int32 4
-int64 8
-uint8 1
-uint16 2
-uint32 4
-uint64 8
-float32 4
-float64 8
-complex64 8
-complex128 16
+int8 1 8
+int16 2 16
+int32 4 32
+int64 8 64
+uint8 1 8
+uint16 2 16
+uint32 4 32
+uint64 8 64
+float32 4 32
+float64 8 64
+complex64 8 64
+complex128 16 128
+type assertion succeeded for unreferenced type

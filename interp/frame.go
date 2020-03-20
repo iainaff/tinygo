@@ -4,20 +4,16 @@ package interp
 // functions.
 
 import (
-	"errors"
 	"strings"
 
 	"tinygo.org/x/go-llvm"
 )
 
 type frame struct {
-	*Eval
-	fn      llvm.Value
-	pkgName string
-	locals  map[llvm.Value]Value
+	*evalPackage
+	fn     llvm.Value
+	locals map[llvm.Value]Value
 }
-
-var ErrUnreachable = errors.New("interp: unreachable executed")
 
 // evalBasicBlock evaluates a single basic block, returning the return value (if
 // ending with a ret instruction), a list of outgoing basic blocks (if not
@@ -79,26 +75,29 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 				fr.locals[inst] = &LocalValue{fr.Eval, fr.builder.CreateXor(lhs, rhs, "")}
 
 			default:
-				return nil, nil, &Unsupported{inst}
+				return nil, nil, fr.unsupportedInstructionError(inst)
 			}
 
 		// Memory operators
 		case !inst.IsAAllocaInst().IsNil():
-			fr.locals[inst] = &AllocaValue{
-				Underlying: getZeroValue(inst.Type().ElementType()),
-				Dirty:      false,
+			allocType := inst.Type().ElementType()
+			alloca := llvm.AddGlobal(fr.Mod, allocType, fr.packagePath+"$alloca")
+			alloca.SetInitializer(llvm.ConstNull(allocType))
+			alloca.SetLinkage(llvm.InternalLinkage)
+			fr.locals[inst] = &LocalValue{
+				Underlying: alloca,
 				Eval:       fr.Eval,
 			}
 		case !inst.IsALoadInst().IsNil():
-			operand := fr.getLocal(inst.Operand(0))
+			operand := fr.getLocal(inst.Operand(0)).(*LocalValue)
 			var value llvm.Value
-			if !operand.IsConstant() || inst.IsVolatile() {
+			if !operand.IsConstant() || inst.IsVolatile() || (!operand.Underlying.IsAConstantExpr().IsNil() && operand.Underlying.Opcode() == llvm.BitCast) {
 				value = fr.builder.CreateLoad(operand.Value(), inst.Name())
 			} else {
 				value = operand.Load()
 			}
 			if value.Type() != inst.Type() {
-				panic("interp: load: type does not match")
+				return nil, nil, fr.errorAt(inst, "interp: load: type does not match")
 			}
 			fr.locals[inst] = fr.getValue(value)
 		case !inst.IsAStoreInst().IsNil():
@@ -122,15 +121,16 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 					// Not a constant operation.
 					// This should be detected by the scanner, but isn't at the
 					// moment.
-					panic("todo: non-const gep")
+					return nil, nil, fr.errorAt(inst, "todo: non-const gep")
 				}
 				indices[i] = uint32(operand.Value().ZExtValue())
 			}
-			result := value.GetElementPtr(indices)
+			result, err := value.GetElementPtr(indices)
+			if err != nil {
+				return nil, nil, fr.errorAt(inst, err.Error())
+			}
 			if result.Type() != inst.Type() {
-				println(" expected:", inst.Type().String())
-				println(" actual:  ", result.Type().String())
-				panic("interp: gep: type does not match")
+				return nil, nil, fr.errorAt(inst, "interp: gep: type does not match")
 			}
 			fr.locals[inst] = result
 
@@ -173,17 +173,55 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 					continue // special case: bitcast of alloc
 				}
 			}
-			value := fr.getLocal(operand)
-			if bc, ok := value.(*PointerCastValue); ok {
-				value = bc.Underlying // avoid double bitcasts
+			if _, ok := fr.getLocal(operand).(*MapValue); ok {
+				// Special case for runtime.trackPointer calls.
+				// Note: this might not be entirely sound in some rare cases
+				// where the map is stored in a dirty global.
+				uses := getUses(inst)
+				if len(uses) == 1 {
+					use := uses[0]
+					if !use.IsACallInst().IsNil() && !use.CalledValue().IsAFunction().IsNil() && use.CalledValue().Name() == "runtime.trackPointer" {
+						continue
+					}
+				}
+				// It is not possible in Go to bitcast a map value to a pointer.
+				return nil, nil, fr.errorAt(inst, "unimplemented: bitcast of map")
 			}
-			fr.locals[inst] = &PointerCastValue{Eval: fr.Eval, Underlying: value, CastType: inst.Type()}
+			value := fr.getLocal(operand).(*LocalValue)
+			fr.locals[inst] = &LocalValue{fr.Eval, fr.builder.CreateBitCast(value.Value(), inst.Type(), "")}
 
 		// Other operators
 		case !inst.IsAICmpInst().IsNil():
 			lhs := fr.getLocal(inst.Operand(0)).(*LocalValue).Underlying
 			rhs := fr.getLocal(inst.Operand(1)).(*LocalValue).Underlying
 			predicate := inst.IntPredicate()
+			if predicate == llvm.IntEQ {
+				var lhsZero, rhsZero bool
+				var ok1, ok2 bool
+				if lhs.Type().TypeKind() == llvm.PointerTypeKind {
+					// Unfortunately, the const propagation in the IR builder
+					// doesn't handle pointer compares of inttoptr values. So we
+					// implement it manually here.
+					lhsZero, ok1 = isPointerNil(lhs)
+					rhsZero, ok2 = isPointerNil(rhs)
+				}
+				if lhs.Type().TypeKind() == llvm.IntegerTypeKind {
+					lhsZero, ok1 = isZero(lhs)
+					rhsZero, ok2 = isZero(rhs)
+				}
+				if ok1 && ok2 {
+					if lhsZero && rhsZero {
+						// Both are zero, so this icmp is always evaluated to true.
+						fr.locals[inst] = &LocalValue{fr.Eval, llvm.ConstInt(fr.Mod.Context().Int1Type(), 1, false)}
+						continue
+					}
+					if lhsZero != rhsZero {
+						// Only one of them is zero, so this comparison must return false.
+						fr.locals[inst] = &LocalValue{fr.Eval, llvm.ConstInt(fr.Mod.Context().Int1Type(), 0, false)}
+						continue
+					}
+				}
+			}
 			fr.locals[inst] = &LocalValue{fr.Eval, fr.builder.CreateICmp(predicate, lhs, rhs, "")}
 		case !inst.IsAFCmpInst().IsNil():
 			lhs := fr.getLocal(inst.Operand(0)).(*LocalValue).Underlying
@@ -214,22 +252,26 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 				if size != typeSize {
 					// allocate an array
 					if size%typeSize != 0 {
-						return nil, nil, &Unsupported{inst}
+						return nil, nil, fr.unsupportedInstructionError(inst)
 					}
 					elementCount = int(size / typeSize)
 					allocType = llvm.ArrayType(allocType, elementCount)
 				}
-				alloc := llvm.AddGlobal(fr.Mod, allocType, fr.pkgName+"$alloc")
-				alloc.SetInitializer(getZeroValue(allocType))
+				alloc := llvm.AddGlobal(fr.Mod, allocType, fr.packagePath+"$alloc")
+				alloc.SetInitializer(llvm.ConstNull(allocType))
 				alloc.SetLinkage(llvm.InternalLinkage)
-				result := &GlobalValue{
+				result := &LocalValue{
 					Underlying: alloc,
 					Eval:       fr.Eval,
 				}
 				if elementCount == 1 {
 					fr.locals[resultInst] = result
 				} else {
-					fr.locals[resultInst] = result.GetElementPtr([]uint32{0, 0})
+					result, err := result.GetElementPtr([]uint32{0, 0})
+					if err != nil {
+						return nil, nil, errorAt(inst, err.Error())
+					}
+					fr.locals[resultInst] = result
 				}
 			case callee.Name() == "runtime.hashmapMake":
 				// create a map
@@ -237,24 +279,55 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 				valueSize := inst.Operand(1).ZExtValue()
 				fr.locals[inst] = &MapValue{
 					Eval:      fr.Eval,
-					PkgName:   fr.pkgName,
+					PkgName:   fr.packagePath,
 					KeySize:   int(keySize),
 					ValueSize: int(valueSize),
 				}
 			case callee.Name() == "runtime.hashmapStringSet":
 				// set a string key in the map
-				m := fr.getLocal(inst.Operand(0)).(*MapValue)
+				keyBuf := fr.getLocal(inst.Operand(1)).(*LocalValue)
+				keyLen := fr.getLocal(inst.Operand(2)).(*LocalValue)
+				valPtr := fr.getLocal(inst.Operand(3)).(*LocalValue)
+				m, ok := fr.getLocal(inst.Operand(0)).(*MapValue)
+				if !ok || !keyBuf.IsConstant() || !keyLen.IsConstant() || !valPtr.IsConstant() {
+					// The mapassign operation could not be done at compile
+					// time. Do it at runtime instead.
+					m := fr.getLocal(inst.Operand(0)).Value()
+					fr.markDirty(m)
+					llvmParams := []llvm.Value{
+						m,                                    // *runtime.hashmap
+						fr.getLocal(inst.Operand(1)).Value(), // key.ptr
+						fr.getLocal(inst.Operand(2)).Value(), // key.len
+						fr.getLocal(inst.Operand(3)).Value(), // value (unsafe.Pointer)
+						fr.getLocal(inst.Operand(4)).Value(), // context
+						fr.getLocal(inst.Operand(5)).Value(), // parentHandle
+					}
+					fr.builder.CreateCall(callee, llvmParams, "")
+					continue
+				}
 				// "key" is a Go string value, which in the TinyGo calling convention is split up
 				// into separate pointer and length parameters.
-				keyBuf := fr.getLocal(inst.Operand(1))
-				keyLen := fr.getLocal(inst.Operand(2))
-				valPtr := fr.getLocal(inst.Operand(3))
 				m.PutString(keyBuf, keyLen, valPtr)
 			case callee.Name() == "runtime.hashmapBinarySet":
 				// set a binary (int etc.) key in the map
-				m := fr.getLocal(inst.Operand(0)).(*MapValue)
-				keyBuf := fr.getLocal(inst.Operand(1))
-				valPtr := fr.getLocal(inst.Operand(2))
+				keyBuf := fr.getLocal(inst.Operand(1)).(*LocalValue)
+				valPtr := fr.getLocal(inst.Operand(2)).(*LocalValue)
+				m, ok := fr.getLocal(inst.Operand(0)).(*MapValue)
+				if !ok || !keyBuf.IsConstant() || !valPtr.IsConstant() {
+					// The mapassign operation could not be done at compile
+					// time. Do it at runtime instead.
+					m := fr.getLocal(inst.Operand(0)).Value()
+					fr.markDirty(m)
+					llvmParams := []llvm.Value{
+						m,                                    // *runtime.hashmap
+						fr.getLocal(inst.Operand(1)).Value(), // key
+						fr.getLocal(inst.Operand(2)).Value(), // value
+						fr.getLocal(inst.Operand(3)).Value(), // context
+						fr.getLocal(inst.Operand(4)).Value(), // parentHandle
+					}
+					fr.builder.CreateCall(callee, llvmParams, "")
+					continue
+				}
 				m.PutBinary(keyBuf, valPtr)
 			case callee.Name() == "runtime.stringConcat":
 				// adding two strings together
@@ -271,7 +344,7 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 				}
 				globalType := llvm.ArrayType(fr.Mod.Context().Int8Type(), len(result))
 				globalValue := llvm.ConstArray(fr.Mod.Context().Int8Type(), vals)
-				global := llvm.AddGlobal(fr.Mod, globalType, fr.pkgName+"$stringconcat")
+				global := llvm.AddGlobal(fr.Mod, globalType, fr.packagePath+"$stringconcat")
 				global.SetInitializer(globalValue)
 				global.SetLinkage(llvm.InternalLinkage)
 				global.SetGlobalConstant(true)
@@ -279,10 +352,70 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 				stringType := fr.Mod.GetTypeByName("runtime._string")
 				retPtr := llvm.ConstGEP(global, getLLVMIndices(fr.Mod.Context().Int32Type(), []uint32{0, 0}))
 				retLen := llvm.ConstInt(stringType.StructElementTypes()[1], uint64(len(result)), false)
-				ret := getZeroValue(stringType)
+				ret := llvm.ConstNull(stringType)
 				ret = llvm.ConstInsertValue(ret, retPtr, []uint32{0})
 				ret = llvm.ConstInsertValue(ret, retLen, []uint32{1})
 				fr.locals[inst] = &LocalValue{fr.Eval, ret}
+			case callee.Name() == "runtime.sliceCopy":
+				elementSize := fr.getLocal(inst.Operand(4)).(*LocalValue).Value().ZExtValue()
+				dstArray := fr.getLocal(inst.Operand(0)).(*LocalValue).stripPointerCasts()
+				srcArray := fr.getLocal(inst.Operand(1)).(*LocalValue).stripPointerCasts()
+				dstLen := fr.getLocal(inst.Operand(2)).(*LocalValue)
+				srcLen := fr.getLocal(inst.Operand(3)).(*LocalValue)
+				if elementSize != 1 && dstArray.Type().ElementType().TypeKind() == llvm.ArrayTypeKind && srcArray.Type().ElementType().TypeKind() == llvm.ArrayTypeKind {
+					// Slice data pointers are created by adding a global array
+					// and getting the address of the first element using a GEP.
+					// However, before the compiler can pass it to
+					// runtime.sliceCopy, it has to perform a bitcast to a *i8,
+					// to make it a unsafe.Pointer. Now, when the IR builder
+					// sees a bitcast of a GEP with zero indices, it will make
+					// a bitcast of the original array instead of the GEP,
+					// which breaks our assumptions.
+					// Re-add this GEP, in the hope that it it is then of the correct type...
+					dstArrayValue, err := dstArray.GetElementPtr([]uint32{0, 0})
+					if err != nil {
+						return nil, nil, errorAt(inst, err.Error())
+					}
+					dstArray = dstArrayValue.(*LocalValue)
+					srcArrayValue, err := srcArray.GetElementPtr([]uint32{0, 0})
+					if err != nil {
+						return nil, nil, errorAt(inst, err.Error())
+					}
+					srcArray = srcArrayValue.(*LocalValue)
+				}
+				if fr.Eval.TargetData.TypeAllocSize(dstArray.Type().ElementType()) != elementSize {
+					return nil, nil, fr.errorAt(inst, "interp: slice dst element size does not match pointer type")
+				}
+				if fr.Eval.TargetData.TypeAllocSize(srcArray.Type().ElementType()) != elementSize {
+					return nil, nil, fr.errorAt(inst, "interp: slice src element size does not match pointer type")
+				}
+				if dstArray.Type() != srcArray.Type() {
+					return nil, nil, fr.errorAt(inst, "interp: slice element types don't match")
+				}
+				length := dstLen.Value().SExtValue()
+				if srcLength := srcLen.Value().SExtValue(); srcLength < length {
+					length = srcLength
+				}
+				if length < 0 {
+					return nil, nil, fr.errorAt(inst, "interp: trying to copy a slice with negative length?")
+				}
+				for i := int64(0); i < length; i++ {
+					var err error
+					// *dst = *src
+					dstArray.Store(srcArray.Load())
+					// dst++
+					dstArrayValue, err := dstArray.GetElementPtr([]uint32{1})
+					if err != nil {
+						return nil, nil, errorAt(inst, err.Error())
+					}
+					dstArray = dstArrayValue.(*LocalValue)
+					// src++
+					srcArrayValue, err := srcArray.GetElementPtr([]uint32{1})
+					if err != nil {
+						return nil, nil, errorAt(inst, err.Error())
+					}
+					srcArray = srcArrayValue.(*LocalValue)
+				}
 			case callee.Name() == "runtime.stringToBytes":
 				// convert a string to a []byte
 				bufPtr := fr.getLocal(inst.Operand(0))
@@ -294,7 +427,7 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 				}
 				globalType := llvm.ArrayType(fr.Mod.Context().Int8Type(), len(result))
 				globalValue := llvm.ConstArray(fr.Mod.Context().Int8Type(), vals)
-				global := llvm.AddGlobal(fr.Mod, globalType, fr.pkgName+"$bytes")
+				global := llvm.AddGlobal(fr.Mod, globalType, fr.packagePath+"$bytes")
 				global.SetInitializer(globalValue)
 				global.SetLinkage(llvm.InternalLinkage)
 				global.SetGlobalConstant(true)
@@ -302,14 +435,57 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 				sliceType := inst.Type()
 				retPtr := llvm.ConstGEP(global, getLLVMIndices(fr.Mod.Context().Int32Type(), []uint32{0, 0}))
 				retLen := llvm.ConstInt(sliceType.StructElementTypes()[1], uint64(len(result)), false)
-				ret := getZeroValue(sliceType)
+				ret := llvm.ConstNull(sliceType)
 				ret = llvm.ConstInsertValue(ret, retPtr, []uint32{0}) // ptr
 				ret = llvm.ConstInsertValue(ret, retLen, []uint32{1}) // len
 				ret = llvm.ConstInsertValue(ret, retLen, []uint32{2}) // cap
 				fr.locals[inst] = &LocalValue{fr.Eval, ret}
-			case callee.Name() == "runtime.makeInterface":
-				uintptrType := callee.Type().Context().IntType(fr.TargetData.PointerSize() * 8)
-				fr.locals[inst] = &LocalValue{fr.Eval, llvm.ConstPtrToInt(inst.Operand(0), uintptrType)}
+			case callee.Name() == "runtime.interfaceImplements":
+				typecode := fr.getLocal(inst.Operand(0)).(*LocalValue).Underlying
+				interfaceMethodSet := fr.getLocal(inst.Operand(1)).(*LocalValue).Underlying
+				if typecode.IsAConstantExpr().IsNil() || typecode.Opcode() != llvm.PtrToInt {
+					return nil, nil, fr.errorAt(inst, "interp: expected typecode to be a ptrtoint")
+				}
+				typecode = typecode.Operand(0)
+				if interfaceMethodSet.IsAConstantExpr().IsNil() || interfaceMethodSet.Opcode() != llvm.GetElementPtr {
+					return nil, nil, fr.errorAt(inst, "interp: expected method set in runtime.interfaceImplements to be a constant gep")
+				}
+				interfaceMethodSet = interfaceMethodSet.Operand(0).Initializer()
+				methodSet := llvm.ConstExtractValue(typecode.Initializer(), []uint32{1})
+				if methodSet.IsAConstantExpr().IsNil() || methodSet.Opcode() != llvm.GetElementPtr {
+					return nil, nil, fr.errorAt(inst, "interp: expected method set to be a constant gep")
+				}
+				methodSet = methodSet.Operand(0).Initializer()
+
+				// Make a set of all the methods on the concrete type, for
+				// easier checking in the next step.
+				definedMethods := map[string]struct{}{}
+				for i := 0; i < methodSet.Type().ArrayLength(); i++ {
+					methodInfo := llvm.ConstExtractValue(methodSet, []uint32{uint32(i)})
+					name := llvm.ConstExtractValue(methodInfo, []uint32{0}).Name()
+					definedMethods[name] = struct{}{}
+				}
+				// Check whether all interface methods are also in the list
+				// of defined methods calculated above.
+				implements := uint64(1) // i1 true
+				for i := 0; i < interfaceMethodSet.Type().ArrayLength(); i++ {
+					name := llvm.ConstExtractValue(interfaceMethodSet, []uint32{uint32(i)}).Name()
+					if _, ok := definedMethods[name]; !ok {
+						// There is a method on the interface that is not
+						// implemented by the type.
+						implements = 0 // i1 false
+						break
+					}
+				}
+				fr.locals[inst] = &LocalValue{fr.Eval, llvm.ConstInt(fr.Mod.Context().Int1Type(), implements, false)}
+			case callee.Name() == "runtime.nanotime":
+				fr.locals[inst] = &LocalValue{fr.Eval, llvm.ConstInt(fr.Mod.Context().Int64Type(), 0, false)}
+			case callee.Name() == "llvm.dbg.value":
+				// do nothing
+			case strings.HasPrefix(callee.Name(), "llvm.lifetime."):
+				// do nothing
+			case callee.Name() == "runtime.trackPointer":
+				// do nothing
 			case strings.HasPrefix(callee.Name(), "runtime.print") || callee.Name() == "runtime._panic":
 				// This are all print instructions, which necessarily have side
 				// effects but no results.
@@ -349,7 +525,10 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 					params = append(params, local)
 				}
 				var ret Value
-				scanResult := fr.Eval.hasSideEffects(callee)
+				scanResult, err := fr.hasSideEffects(callee)
+				if err != nil {
+					return nil, nil, err
+				}
 				if scanResult.severity == sideEffectLimited || dirtyParams && scanResult.severity != sideEffectAll {
 					// Side effect is bounded. This means the operation invokes
 					// side effects (like calling an external function) but it
@@ -372,7 +551,7 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 					//     compile time.
 					//   * Unbounded: cannot call at runtime so we'll try to
 					//     interpret anyway and hope for the best.
-					ret, err = fr.function(callee, params, fr.pkgName, indent+"    ")
+					ret, err = fr.function(callee, params, indent+"    ")
 					if err != nil {
 						return nil, nil, err
 					}
@@ -382,7 +561,7 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 				}
 			default:
 				// function pointers, etc.
-				return nil, nil, &Unsupported{inst}
+				return nil, nil, fr.unsupportedInstructionError(inst)
 			}
 		case !inst.IsAExtractValueInst().IsNil():
 			agg := fr.getLocal(inst.Operand(0)).(*LocalValue) // must be constant
@@ -392,7 +571,7 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 				fr.locals[inst] = fr.getValue(newValue)
 			} else {
 				if len(indices) != 1 {
-					return nil, nil, errors.New("cannot handle extractvalue with not exactly 1 index")
+					return nil, nil, fr.errorAt(inst, "interp: cannot handle extractvalue with not exactly 1 index")
 				}
 				fr.locals[inst] = &LocalValue{fr.Eval, fr.builder.CreateExtractValue(agg.Underlying, int(indices[0]), inst.Name())}
 			}
@@ -405,7 +584,7 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 				fr.locals[inst] = &LocalValue{fr.Eval, newValue}
 			} else {
 				if len(indices) != 1 {
-					return nil, nil, errors.New("cannot handle insertvalue with not exactly 1 index")
+					return nil, nil, fr.errorAt(inst, "interp: cannot handle insertvalue with not exactly 1 index")
 				}
 				fr.locals[inst] = &LocalValue{fr.Eval, fr.builder.CreateInsertValue(agg.Underlying, val.Value(), int(indices[0]), inst.Name())}
 			}
@@ -418,21 +597,25 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 			// conditional branch (if/then/else)
 			cond := fr.getLocal(inst.Operand(0)).Value()
 			if cond.Type() != fr.Mod.Context().Int1Type() {
-				panic("expected an i1 in a branch instruction")
+				return nil, nil, fr.errorAt(inst, "expected an i1 in a branch instruction")
 			}
 			thenBB := inst.Operand(1)
 			elseBB := inst.Operand(2)
-			if !cond.IsConstant() {
-				return nil, nil, errors.New("interp: branch on a non-constant")
-			} else {
-				switch cond.ZExtValue() {
-				case 0: // false
-					return nil, []llvm.Value{thenBB}, nil // then
-				case 1: // true
-					return nil, []llvm.Value{elseBB}, nil // else
-				default:
-					panic("branch was not true or false")
-				}
+			if !cond.IsAInstruction().IsNil() {
+				return nil, nil, fr.errorAt(inst, "interp: branch on a non-constant")
+			}
+			if !cond.IsAConstantExpr().IsNil() {
+				// This may happen when the instruction builder could not
+				// const-fold some instructions.
+				return nil, nil, fr.errorAt(inst, "interp: branch on a non-const-propagated constant expression")
+			}
+			switch cond {
+			case llvm.ConstInt(fr.Mod.Context().Int1Type(), 0, false): // false
+				return nil, []llvm.Value{thenBB}, nil // then
+			case llvm.ConstInt(fr.Mod.Context().Int1Type(), 1, false): // true
+				return nil, []llvm.Value{elseBB}, nil // else
+			default:
+				return nil, nil, fr.errorAt(inst, "branch was not true or false")
 			}
 		case !inst.IsABranchInst().IsNil() && inst.OperandsCount() == 1:
 			// unconditional branch (goto)
@@ -440,10 +623,11 @@ func (fr *frame) evalBasicBlock(bb, incoming llvm.BasicBlock, indent string) (re
 		case !inst.IsAUnreachableInst().IsNil():
 			// Unreachable was reached (e.g. after a call to panic()).
 			// Report this as an error, as it is not supposed to happen.
-			return nil, nil, ErrUnreachable
+			// This is a sentinel error value.
+			return nil, nil, errUnreachable
 
 		default:
-			return nil, nil, &Unsupported{inst}
+			return nil, nil, fr.unsupportedInstructionError(inst)
 		}
 	}
 
@@ -457,6 +641,7 @@ func (fr *frame) getLocal(v llvm.Value) Value {
 	} else if value := fr.getValue(v); value != nil {
 		return value
 	} else {
+		// This should not happen under normal circumstances.
 		panic("cannot find value")
 	}
 }

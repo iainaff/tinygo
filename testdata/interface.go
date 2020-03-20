@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 func main() {
 	thing := &Thing{"foo"}
 	println("thing:", thing.String())
@@ -11,6 +13,10 @@ func main() {
 	printItf(*thing)
 	printItf(thing)
 	printItf(Stringer(thing))
+	printItf(struct{ n int }{})
+	printItf(struct {
+		n int `foo:"bar"`
+	}{})
 	printItf(Number(3))
 	array := Array([4]uint32{1, 7, 11, 13})
 	printItf(array)
@@ -22,6 +28,79 @@ func main() {
 	println("Stringer.(*Thing).String():", itf.(Stringer).String())
 
 	println("nested switch:", nestedSwitch('v', 3))
+
+	// Try putting a linked list in an interface:
+	// https://github.com/tinygo-org/tinygo/issues/309
+	itf = linkedList{}
+
+	// Test bugfix for assertion on named empty interface:
+	// https://github.com/tinygo-org/tinygo/issues/453
+	_, _ = itf.(Empty)
+
+	var n int
+	var f float32
+	var interfaceEqualTests = []struct {
+		equal bool
+		lhs   interface{}
+		rhs   interface{}
+	}{
+		{true, true, true},
+		{true, int(1), int(1)},
+		{true, int8(1), int8(1)},
+		{true, int16(1), int16(1)},
+		{true, int32(1), int32(1)},
+		{true, int64(1), int64(1)},
+		{true, uint(1), uint(1)},
+		{false, uint(1), uint(2)},
+		{true, uint8(1), uint8(1)},
+		{true, uint16(1), uint16(1)},
+		{true, uint32(1), uint32(1)},
+		{true, uint64(1), uint64(1)},
+		{true, uintptr(1), uintptr(1)},
+		{true, float32(1.1), float32(1.1)},
+		{true, float64(1.1), float64(1.1)},
+		{true, complex(100, 8), complex(100, 8)},
+		{false, complex(100, 8), complex(101, 8)},
+		{false, complex(100, 8), complex(100, 9)},
+		{true, complex64(8), complex64(8)},
+		{true, complex128(8), complex128(8)},
+		{true, "string", "string"},
+		{false, "string", "stringx"},
+		{true, [2]int16{-5, 201}, [2]int16{-5, 201}},
+		{false, [2]int16{-5, 201}, [2]int16{-5, 202}},
+		{false, [2]int16{-5, 201}, [2]int16{5, 201}},
+		{true, &n, &n},
+		{false, &n, new(int)},
+		{false, new(int), new(int)},
+		{false, &n, &f},
+		{true, struct {
+			a int
+			b int
+		}{3, 5}, struct {
+			a int
+			b int
+		}{3, 5}},
+		{false, struct {
+			a int
+			b int
+		}{3, 5}, struct {
+			a int
+			b int
+		}{3, 6}},
+	}
+	for i, tc := range interfaceEqualTests {
+		if (tc.lhs == tc.rhs) != tc.equal {
+			println("test", i, "of interfaceEqualTests failed")
+		}
+	}
+
+	// test interface blocking
+	blockDynamic(NonBlocker{})
+	println("non-blocking call on sometimes-blocking interface")
+	blockDynamic(SleepBlocker(time.Millisecond))
+	println("slept 1ms")
+	blockStatic(SleepBlocker(time.Millisecond))
+	println("slept 1ms")
 }
 
 func printItf(val interface{}) {
@@ -43,6 +122,14 @@ func printItf(val interface{}) {
 		println("is Thing:", val.String())
 	case *Thing:
 		println("is *Thing:", val.String())
+	case struct{ i int }:
+		println("is struct{i int}")
+	case struct{ n int }:
+		println("is struct{n int}")
+	case struct {
+		n int `foo:"bar"`
+	}:
+		println("is struct{n int `foo:\"bar\"`}")
 	case Foo:
 		println("is Foo:", val)
 	default:
@@ -59,6 +146,14 @@ func nestedSwitch(verb rune, arg interface{}) bool {
 		}
 	}
 	return false
+}
+
+func blockDynamic(blocker DynamicBlocker) {
+	blocker.Block()
+}
+
+func blockStatic(blocker StaticBlocker) {
+	blocker.Sleep()
 }
 
 type Thing struct {
@@ -134,3 +229,31 @@ func (p SmallPair) Print() {
 type Unmatched interface {
 	NeverImplementedMethod()
 }
+
+type linkedList struct {
+	addr *linkedList
+}
+
+type DynamicBlocker interface {
+	Block()
+}
+
+type NonBlocker struct{}
+
+func (b NonBlocker) Block() {}
+
+type SleepBlocker time.Duration
+
+func (s SleepBlocker) Block() {
+	time.Sleep(time.Duration(s))
+}
+
+func (s SleepBlocker) Sleep() {
+	s.Block()
+}
+
+type StaticBlocker interface {
+	Sleep()
+}
+
+type Empty interface{}

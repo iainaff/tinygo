@@ -7,7 +7,6 @@ package interp
 // methods.
 
 import (
-	"errors"
 	"strings"
 
 	"tinygo.org/x/go-llvm"
@@ -18,14 +17,21 @@ type Eval struct {
 	TargetData      llvm.TargetData
 	Debug           bool
 	builder         llvm.Builder
-	dibuilder       *llvm.DIBuilder
 	dirtyGlobals    map[llvm.Value]struct{}
 	sideEffectFuncs map[llvm.Value]*sideEffectResult // cache of side effect scan results
 }
 
+// evalPackage encapsulates the Eval type for just a single package. The Eval
+// type keeps state across the whole program, the evalPackage type keeps extra
+// state for the currently interpreted package.
+type evalPackage struct {
+	*Eval
+	packagePath string
+}
+
 // Run evaluates the function with the given name and then eliminates all
 // callers.
-func Run(mod llvm.Module, targetData llvm.TargetData, debug bool) error {
+func Run(mod llvm.Module, debug bool) error {
 	if debug {
 		println("\ncompile-time evaluation:")
 	}
@@ -33,24 +39,31 @@ func Run(mod llvm.Module, targetData llvm.TargetData, debug bool) error {
 	name := "runtime.initAll"
 	e := &Eval{
 		Mod:          mod,
-		TargetData:   targetData,
+		TargetData:   llvm.NewTargetData(mod.DataLayout()),
 		Debug:        debug,
 		dirtyGlobals: map[llvm.Value]struct{}{},
 	}
 	e.builder = mod.Context().NewBuilder()
-	e.dibuilder = llvm.NewDIBuilder(mod)
 
 	initAll := mod.NamedFunction(name)
 	bb := initAll.EntryBasicBlock()
-	e.builder.SetInsertPointBefore(bb.LastInstruction())
-	e.builder.SetInstDebugLocation(bb.FirstInstruction())
+	// Create a dummy alloca in the entry block that we can set the insert point
+	// to. This is necessary because otherwise we might be removing the
+	// instruction (init call) that we are removing after successful
+	// interpretation.
+	e.builder.SetInsertPointBefore(bb.FirstInstruction())
+	dummy := e.builder.CreateAlloca(e.Mod.Context().Int8Type(), "dummy")
+	e.builder.SetInsertPointBefore(dummy)
 	var initCalls []llvm.Value
 	for inst := bb.FirstInstruction(); !inst.IsNil(); inst = llvm.NextInstruction(inst) {
+		if inst == dummy {
+			continue
+		}
 		if !inst.IsAReturnInst().IsNil() {
 			break // ret void
 		}
 		if inst.IsACallInst().IsNil() || inst.CalledValue().IsAFunction().IsNil() {
-			return errors.New("expected all instructions in " + name + " to be direct calls")
+			return errorAt(inst, "interp: expected all instructions in "+name+" to be direct calls")
 		}
 		initCalls = append(initCalls, inst)
 	}
@@ -60,13 +73,17 @@ func Run(mod llvm.Module, targetData llvm.TargetData, debug bool) error {
 	for _, call := range initCalls {
 		initName := call.CalledValue().Name()
 		if !strings.HasSuffix(initName, ".init") {
-			return errors.New("expected all instructions in " + name + " to be *.init() calls")
+			return errorAt(call, "interp: expected all instructions in "+name+" to be *.init() calls")
 		}
 		pkgName := initName[:len(initName)-5]
 		fn := call.CalledValue()
 		call.EraseFromParentAsInstruction()
-		_, err := e.Function(fn, []Value{&LocalValue{e, undefPtr}, &LocalValue{e, undefPtr}}, pkgName)
-		if err == ErrUnreachable {
+		evalPkg := evalPackage{
+			Eval:        e,
+			packagePath: pkgName,
+		}
+		_, err := evalPkg.function(fn, []Value{&LocalValue{e, undefPtr}, &LocalValue{e, undefPtr}}, "")
+		if err == errUnreachable {
 			break
 		}
 		if err != nil {
@@ -77,16 +94,14 @@ func Run(mod llvm.Module, targetData llvm.TargetData, debug bool) error {
 	return nil
 }
 
-func (e *Eval) Function(fn llvm.Value, params []Value, pkgName string) (Value, error) {
-	return e.function(fn, params, pkgName, "")
-}
-
-func (e *Eval) function(fn llvm.Value, params []Value, pkgName, indent string) (Value, error) {
+// function interprets the given function. The params are the function params
+// and the indent is the string indentation to use when dumping all interpreted
+// instructions.
+func (e *evalPackage) function(fn llvm.Value, params []Value, indent string) (Value, error) {
 	fr := frame{
-		Eval:    e,
-		fn:      fn,
-		pkgName: pkgName,
-		locals:  make(map[llvm.Value]Value),
+		evalPackage: e,
+		fn:          fn,
+		locals:      make(map[llvm.Value]Value),
 	}
 	for i, param := range fn.Params() {
 		fr.locals[param] = params[i]
@@ -115,11 +130,7 @@ func (e *Eval) function(fn llvm.Value, params []Value, pkgName, indent string) (
 // getValue determines what kind of LLVM value it gets and returns the
 // appropriate Value type.
 func (e *Eval) getValue(v llvm.Value) Value {
-	if !v.IsAGlobalVariable().IsNil() {
-		return &GlobalValue{e, v}
-	} else {
-		return &LocalValue{e, v}
-	}
+	return &LocalValue{e, v}
 }
 
 // markDirty marks the passed-in LLVM value dirty, recursively. For example,

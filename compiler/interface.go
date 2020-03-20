@@ -22,86 +22,123 @@ import (
 // value field.
 //
 // An interface value is a {typecode, value} tuple, or {i16, i8*} to be exact.
-func (c *Compiler) parseMakeInterface(val llvm.Value, typ types.Type, global string, pos token.Pos) (llvm.Value, error) {
-	var itfValue llvm.Value
-	size := c.targetData.TypeAllocSize(val.Type())
-	if size > c.targetData.TypeAllocSize(c.i8ptrType) {
-		if global != "" {
-			// Allocate in a global variable.
-			global := llvm.AddGlobal(c.mod, val.Type(), global+"$itfvalue")
-			global.SetInitializer(val)
-			global.SetLinkage(llvm.InternalLinkage)
-			global.SetGlobalConstant(true)
-			zero := llvm.ConstInt(c.ctx.Int32Type(), 0, false)
-			itfValueRaw := llvm.ConstInBoundsGEP(global, []llvm.Value{zero, zero})
-			itfValue = llvm.ConstBitCast(itfValueRaw, c.i8ptrType)
-		} else {
-			// Allocate on the heap and put a pointer in the interface.
-			// TODO: escape analysis.
-			sizeValue := llvm.ConstInt(c.uintptrType, size, false)
-			alloc := c.createRuntimeCall("alloc", []llvm.Value{sizeValue}, "makeinterface.alloc")
-			itfValueCast := c.builder.CreateBitCast(alloc, llvm.PointerType(val.Type(), 0), "makeinterface.cast.value")
-			c.builder.CreateStore(val, itfValueCast)
-			itfValue = c.builder.CreateBitCast(itfValueCast, c.i8ptrType, "makeinterface.cast.i8ptr")
-		}
-	} else if size == 0 {
-		itfValue = llvm.ConstPointerNull(c.i8ptrType)
-	} else {
-		// Directly place the value in the interface.
-		switch val.Type().TypeKind() {
-		case llvm.IntegerTypeKind:
-			itfValue = c.builder.CreateIntToPtr(val, c.i8ptrType, "makeinterface.cast.int")
-		case llvm.PointerTypeKind:
-			itfValue = c.builder.CreateBitCast(val, c.i8ptrType, "makeinterface.cast.ptr")
-		case llvm.StructTypeKind, llvm.FloatTypeKind, llvm.DoubleTypeKind, llvm.VectorTypeKind:
-			// A bitcast would be useful here, but bitcast doesn't allow
-			// aggregate types. So we'll bitcast it using an alloca.
-			// Hopefully this will get optimized away.
-			mem := c.builder.CreateAlloca(c.i8ptrType, "makeinterface.cast.struct")
-			memStructPtr := c.builder.CreateBitCast(mem, llvm.PointerType(val.Type(), 0), "makeinterface.cast.struct.cast")
-			c.builder.CreateStore(val, memStructPtr)
-			itfValue = c.builder.CreateLoad(mem, "makeinterface.cast.load")
-		default:
-			return llvm.Value{}, c.makeError(pos, "todo: makeinterface: cast small type to i8*")
-		}
-	}
+func (c *Compiler) parseMakeInterface(val llvm.Value, typ types.Type, pos token.Pos) llvm.Value {
+	itfValue := c.emitPointerPack([]llvm.Value{val})
 	itfTypeCodeGlobal := c.getTypeCode(typ)
-	itfMethodSetGlobal, err := c.getTypeMethodSet(typ)
-	if err != nil {
-		return llvm.Value{}, nil
+	itfMethodSetGlobal := c.getTypeMethodSet(typ)
+	itfConcreteTypeGlobal := c.mod.NamedGlobal("typeInInterface:" + itfTypeCodeGlobal.Name())
+	if itfConcreteTypeGlobal.IsNil() {
+		typeInInterface := c.getLLVMRuntimeType("typeInInterface")
+		itfConcreteTypeGlobal = llvm.AddGlobal(c.mod, typeInInterface, "typeInInterface:"+itfTypeCodeGlobal.Name())
+		itfConcreteTypeGlobal.SetInitializer(llvm.ConstNamedStruct(typeInInterface, []llvm.Value{itfTypeCodeGlobal, itfMethodSetGlobal}))
+		itfConcreteTypeGlobal.SetGlobalConstant(true)
+		itfConcreteTypeGlobal.SetLinkage(llvm.PrivateLinkage)
 	}
-	itfTypeCode := c.createRuntimeCall("makeInterface", []llvm.Value{itfTypeCodeGlobal, itfMethodSetGlobal}, "makeinterface.typecode")
-	itf := llvm.Undef(c.mod.GetTypeByName("runtime._interface"))
+	itfTypeCode := c.builder.CreatePtrToInt(itfConcreteTypeGlobal, c.uintptrType, "")
+	itf := llvm.Undef(c.getLLVMRuntimeType("_interface"))
 	itf = c.builder.CreateInsertValue(itf, itfTypeCode, 0, "")
 	itf = c.builder.CreateInsertValue(itf, itfValue, 1, "")
-	return itf, nil
+	return itf
 }
 
 // getTypeCode returns a reference to a type code.
 // It returns a pointer to an external global which should be replaced with the
 // real type in the interface lowering pass.
 func (c *Compiler) getTypeCode(typ types.Type) llvm.Value {
-	globalName := "type:" + getTypeCodeName(typ)
+	globalName := "reflect/types.type:" + getTypeCodeName(typ)
 	global := c.mod.NamedGlobal(globalName)
 	if global.IsNil() {
-		global = llvm.AddGlobal(c.mod, c.ctx.Int8Type(), globalName)
+		// Create a new typecode global.
+		global = llvm.AddGlobal(c.mod, c.getLLVMRuntimeType("typecodeID"), globalName)
+		// Some type classes contain more information for underlying types or
+		// element types. Store it directly in the typecode global to make
+		// reflect lowering simpler.
+		var references llvm.Value
+		var length int64
+		switch typ := typ.(type) {
+		case *types.Named:
+			references = c.getTypeCode(typ.Underlying())
+		case *types.Chan:
+			references = c.getTypeCode(typ.Elem())
+		case *types.Pointer:
+			references = c.getTypeCode(typ.Elem())
+		case *types.Slice:
+			references = c.getTypeCode(typ.Elem())
+		case *types.Array:
+			references = c.getTypeCode(typ.Elem())
+			length = typ.Len()
+		case *types.Struct:
+			// Take a pointer to the typecodeID of the first field (if it exists).
+			structGlobal := c.makeStructTypeFields(typ)
+			references = llvm.ConstBitCast(structGlobal, global.Type())
+		}
+		if !references.IsNil() {
+			// Set the 'references' field of the runtime.typecodeID struct.
+			globalValue := llvm.ConstNull(global.Type().ElementType())
+			globalValue = llvm.ConstInsertValue(globalValue, references, []uint32{0})
+			if length != 0 {
+				lengthValue := llvm.ConstInt(c.uintptrType, uint64(length), false)
+				globalValue = llvm.ConstInsertValue(globalValue, lengthValue, []uint32{1})
+			}
+			global.SetInitializer(globalValue)
+			global.SetLinkage(llvm.PrivateLinkage)
+		}
 		global.SetGlobalConstant(true)
 	}
 	return global
+}
+
+// makeStructTypeFields creates a new global that stores all type information
+// related to this struct type, and returns the resulting global. This global is
+// actually an array of all the fields in the structs.
+func (c *Compiler) makeStructTypeFields(typ *types.Struct) llvm.Value {
+	// The global is an array of runtime.structField structs.
+	runtimeStructField := c.getLLVMRuntimeType("structField")
+	structGlobalType := llvm.ArrayType(runtimeStructField, typ.NumFields())
+	structGlobal := llvm.AddGlobal(c.mod, structGlobalType, "reflect/types.structFields")
+	structGlobalValue := llvm.ConstNull(structGlobalType)
+	for i := 0; i < typ.NumFields(); i++ {
+		fieldGlobalValue := llvm.ConstNull(runtimeStructField)
+		fieldGlobalValue = llvm.ConstInsertValue(fieldGlobalValue, c.getTypeCode(typ.Field(i).Type()), []uint32{0})
+		fieldName := c.makeGlobalArray([]byte(typ.Field(i).Name()), "reflect/types.structFieldName", c.ctx.Int8Type())
+		fieldName.SetLinkage(llvm.PrivateLinkage)
+		fieldName.SetUnnamedAddr(true)
+		fieldName = llvm.ConstGEP(fieldName, []llvm.Value{
+			llvm.ConstInt(llvm.Int32Type(), 0, false),
+			llvm.ConstInt(llvm.Int32Type(), 0, false),
+		})
+		fieldGlobalValue = llvm.ConstInsertValue(fieldGlobalValue, fieldName, []uint32{1})
+		if typ.Tag(i) != "" {
+			fieldTag := c.makeGlobalArray([]byte(typ.Tag(i)), "reflect/types.structFieldTag", c.ctx.Int8Type())
+			fieldTag.SetLinkage(llvm.PrivateLinkage)
+			fieldTag.SetUnnamedAddr(true)
+			fieldTag = llvm.ConstGEP(fieldTag, []llvm.Value{
+				llvm.ConstInt(llvm.Int32Type(), 0, false),
+				llvm.ConstInt(llvm.Int32Type(), 0, false),
+			})
+			fieldGlobalValue = llvm.ConstInsertValue(fieldGlobalValue, fieldTag, []uint32{2})
+		}
+		if typ.Field(i).Embedded() {
+			fieldEmbedded := llvm.ConstInt(c.ctx.Int1Type(), 1, false)
+			fieldGlobalValue = llvm.ConstInsertValue(fieldGlobalValue, fieldEmbedded, []uint32{3})
+		}
+		structGlobalValue = llvm.ConstInsertValue(structGlobalValue, fieldGlobalValue, []uint32{uint32(i)})
+	}
+	structGlobal.SetInitializer(structGlobalValue)
+	structGlobal.SetUnnamedAddr(true)
+	structGlobal.SetLinkage(llvm.PrivateLinkage)
+	return structGlobal
 }
 
 // getTypeCodeName returns a name for this type that can be used in the
 // interface lowering pass to assign type codes as expected by the reflect
 // package. See getTypeCodeNum.
 func getTypeCodeName(t types.Type) string {
-	name := ""
-	if named, ok := t.(*types.Named); ok {
-		name = "~" + named.String() + ":"
-		t = t.Underlying()
-	}
 	switch t := t.(type) {
+	case *types.Named:
+		return "named:" + t.String()
 	case *types.Array:
-		return "array:" + name + strconv.FormatInt(t.Len(), 10) + ":" + getTypeCodeName(t.Elem())
+		return "array:" + strconv.FormatInt(t.Len(), 10) + ":" + getTypeCodeName(t.Elem())
 	case *types.Basic:
 		var kind string
 		switch t.Kind() {
@@ -144,21 +181,21 @@ func getTypeCodeName(t types.Type) string {
 		default:
 			panic("unknown basic type: " + t.Name())
 		}
-		return "basic:" + name + kind
+		return "basic:" + kind
 	case *types.Chan:
-		return "chan:" + name + getTypeCodeName(t.Elem())
+		return "chan:" + getTypeCodeName(t.Elem())
 	case *types.Interface:
 		methods := make([]string, t.NumMethods())
 		for i := 0; i < t.NumMethods(); i++ {
 			methods[i] = getTypeCodeName(t.Method(i).Type())
 		}
-		return "interface:" + name + "{" + strings.Join(methods, ",") + "}"
+		return "interface:" + "{" + strings.Join(methods, ",") + "}"
 	case *types.Map:
 		keyType := getTypeCodeName(t.Key())
 		elemType := getTypeCodeName(t.Elem())
-		return "map:" + name + "{" + keyType + "," + elemType + "}"
+		return "map:" + "{" + keyType + "," + elemType + "}"
 	case *types.Pointer:
-		return "pointer:" + name + getTypeCodeName(t.Elem())
+		return "pointer:" + getTypeCodeName(t.Elem())
 	case *types.Signature:
 		params := make([]string, t.Params().Len())
 		for i := 0; i < t.Params().Len(); i++ {
@@ -168,15 +205,22 @@ func getTypeCodeName(t types.Type) string {
 		for i := 0; i < t.Results().Len(); i++ {
 			results[i] = getTypeCodeName(t.Results().At(i).Type())
 		}
-		return "func:" + name + "{" + strings.Join(params, ",") + "}{" + strings.Join(results, ",") + "}"
+		return "func:" + "{" + strings.Join(params, ",") + "}{" + strings.Join(results, ",") + "}"
 	case *types.Slice:
-		return "slice:" + name + getTypeCodeName(t.Elem())
+		return "slice:" + getTypeCodeName(t.Elem())
 	case *types.Struct:
 		elems := make([]string, t.NumFields())
 		for i := 0; i < t.NumFields(); i++ {
-			elems[i] = getTypeCodeName(t.Field(i).Type())
+			embedded := ""
+			if t.Field(i).Embedded() {
+				embedded = "#"
+			}
+			elems[i] = embedded + t.Field(i).Name() + ":" + getTypeCodeName(t.Field(i).Type())
+			if t.Tag(i) != "" {
+				elems[i] += "`" + t.Tag(i) + "`"
+			}
 		}
-		return "struct:" + name + "{" + strings.Join(elems, ",") + "}"
+		return "struct:" + "{" + strings.Join(elems, ",") + "}"
 	default:
 		panic("unknown type: " + t.String())
 	}
@@ -184,22 +228,22 @@ func getTypeCodeName(t types.Type) string {
 
 // getTypeMethodSet returns a reference (GEP) to a global method set. This
 // method set should be unreferenced after the interface lowering pass.
-func (c *Compiler) getTypeMethodSet(typ types.Type) (llvm.Value, error) {
+func (c *Compiler) getTypeMethodSet(typ types.Type) llvm.Value {
 	global := c.mod.NamedGlobal(typ.String() + "$methodset")
 	zero := llvm.ConstInt(c.ctx.Int32Type(), 0, false)
 	if !global.IsNil() {
 		// the method set already exists
-		return llvm.ConstGEP(global, []llvm.Value{zero, zero}), nil
+		return llvm.ConstGEP(global, []llvm.Value{zero, zero})
 	}
 
 	ms := c.ir.Program.MethodSets.MethodSet(typ)
 	if ms.Len() == 0 {
 		// no methods, so can leave that one out
-		return llvm.ConstPointerNull(llvm.PointerType(c.mod.GetTypeByName("runtime.interfaceMethodInfo"), 0)), nil
+		return llvm.ConstPointerNull(llvm.PointerType(c.getLLVMRuntimeType("interfaceMethodInfo"), 0))
 	}
 
 	methods := make([]llvm.Value, ms.Len())
-	interfaceMethodInfoType := c.mod.GetTypeByName("runtime.interfaceMethodInfo")
+	interfaceMethodInfoType := c.getLLVMRuntimeType("interfaceMethodInfo")
 	for i := 0; i < ms.Len(); i++ {
 		method := ms.At(i)
 		signatureGlobal := c.getMethodSignature(method.Obj().(*types.Func))
@@ -208,13 +252,10 @@ func (c *Compiler) getTypeMethodSet(typ types.Type) (llvm.Value, error) {
 			// compiler error, so panic
 			panic("cannot find function: " + f.LinkName())
 		}
-		fn, err := c.getInterfaceInvokeWrapper(f)
-		if err != nil {
-			return llvm.Value{}, err
-		}
+		fn := c.getInterfaceInvokeWrapper(f)
 		methodInfo := llvm.ConstNamedStruct(interfaceMethodInfoType, []llvm.Value{
 			signatureGlobal,
-			llvm.ConstBitCast(fn, c.i8ptrType),
+			llvm.ConstPtrToInt(fn, c.uintptrType),
 		})
 		methods[i] = methodInfo
 	}
@@ -224,7 +265,7 @@ func (c *Compiler) getTypeMethodSet(typ types.Type) (llvm.Value, error) {
 	global.SetInitializer(value)
 	global.SetGlobalConstant(true)
 	global.SetLinkage(llvm.PrivateLinkage)
-	return llvm.ConstGEP(global, []llvm.Value{zero, zero}), nil
+	return llvm.ConstGEP(global, []llvm.Value{zero, zero})
 }
 
 // getInterfaceMethodSet returns a global variable with the method set of the
@@ -238,14 +279,14 @@ func (c *Compiler) getInterfaceMethodSet(typ *types.Named) llvm.Value {
 		return llvm.ConstGEP(global, []llvm.Value{zero, zero})
 	}
 
-	// Every method is a *i16 reference indicating the signature of this method.
+	// Every method is a *i8 reference indicating the signature of this method.
 	methods := make([]llvm.Value, typ.Underlying().(*types.Interface).NumMethods())
 	for i := range methods {
 		method := typ.Underlying().(*types.Interface).Method(i)
 		methods[i] = c.getMethodSignature(method)
 	}
 
-	value := llvm.ConstArray(methods[0].Type(), methods)
+	value := llvm.ConstArray(c.i8ptrType, methods)
 	global = llvm.AddGlobal(c.mod, value.Type(), typ.String()+"$interface")
 	global.SetInitializer(value)
 	global.SetGlobalConstant(true)
@@ -254,7 +295,7 @@ func (c *Compiler) getInterfaceMethodSet(typ *types.Named) llvm.Value {
 }
 
 // getMethodSignature returns a global variable which is a reference to an
-// external *i16 indicating the indicating the signature of this method. It is
+// external *i8 indicating the indicating the signature of this method. It is
 // used during the interface lowering pass.
 func (c *Compiler) getMethodSignature(method *types.Func) llvm.Value {
 	signature := ir.MethodSignature(method)
@@ -273,19 +314,9 @@ func (c *Compiler) getMethodSignature(method *types.Func) llvm.Value {
 //
 // Type asserts on concrete types are trivial: just compare type numbers. Type
 // asserts on interfaces are more difficult, see the comments in the function.
-func (c *Compiler) parseTypeAssert(frame *Frame, expr *ssa.TypeAssert) (llvm.Value, error) {
-	itf, err := c.parseExpr(frame, expr.X)
-	if err != nil {
-		return llvm.Value{}, err
-	}
-	assertedType, err := c.getLLVMType(expr.AssertedType)
-	if err != nil {
-		return llvm.Value{}, err
-	}
-	valueNil, err := c.getZeroValue(assertedType)
-	if err != nil {
-		return llvm.Value{}, err
-	}
+func (c *Compiler) parseTypeAssert(frame *Frame, expr *ssa.TypeAssert) llvm.Value {
+	itf := c.getValue(frame, expr.X)
+	assertedType := c.getLLVMType(expr.AssertedType)
 
 	actualTypeNum := c.builder.CreateExtractValue(itf, 0, "interface.type")
 	commaOk := llvm.Value{}
@@ -338,71 +369,35 @@ func (c *Compiler) parseTypeAssert(frame *Frame, expr *ssa.TypeAssert) (llvm.Val
 		// Type assert on concrete type. Extract the underlying type from
 		// the interface (but only after checking it matches).
 		valuePtr := c.builder.CreateExtractValue(itf, 1, "typeassert.value.ptr")
-		size := c.targetData.TypeAllocSize(assertedType)
-		if size > c.targetData.TypeAllocSize(c.i8ptrType) {
-			// Value was stored in an allocated buffer, load it from there.
-			valuePtrCast := c.builder.CreateBitCast(valuePtr, llvm.PointerType(assertedType, 0), "")
-			valueOk = c.builder.CreateLoad(valuePtrCast, "typeassert.value.ok")
-		} else if size == 0 {
-			valueOk, err = c.getZeroValue(assertedType)
-			if err != nil {
-				return llvm.Value{}, err
-			}
-		} else {
-			// Value was stored directly in the interface.
-			switch assertedType.TypeKind() {
-			case llvm.IntegerTypeKind:
-				valueOk = c.builder.CreatePtrToInt(valuePtr, assertedType, "typeassert.value.ok")
-			case llvm.PointerTypeKind:
-				valueOk = c.builder.CreateBitCast(valuePtr, assertedType, "typeassert.value.ok")
-			default: // struct, float, etc.
-				// A bitcast would be useful here, but bitcast doesn't allow
-				// aggregate types. So we'll bitcast it using an alloca.
-				// Hopefully this will get optimized away.
-				mem := c.builder.CreateAlloca(c.i8ptrType, "")
-				c.builder.CreateStore(valuePtr, mem)
-				memCast := c.builder.CreateBitCast(mem, llvm.PointerType(assertedType, 0), "")
-				valueOk = c.builder.CreateLoad(memCast, "typeassert.value.ok")
-			}
-		}
+		valueOk = c.emitPointerUnpack(valuePtr, []llvm.Type{assertedType})[0]
 	}
 	c.builder.CreateBr(nextBlock)
 
 	// Continue after the if statement.
 	c.builder.SetInsertPointAtEnd(nextBlock)
 	phi := c.builder.CreatePHI(assertedType, "typeassert.value")
-	phi.AddIncoming([]llvm.Value{valueNil, valueOk}, []llvm.BasicBlock{prevBlock, okBlock})
+	phi.AddIncoming([]llvm.Value{llvm.ConstNull(assertedType), valueOk}, []llvm.BasicBlock{prevBlock, okBlock})
 
 	if expr.CommaOk {
 		tuple := c.ctx.ConstStruct([]llvm.Value{llvm.Undef(assertedType), llvm.Undef(c.ctx.Int1Type())}, false) // create empty tuple
 		tuple = c.builder.CreateInsertValue(tuple, phi, 0, "")                                                  // insert value
 		tuple = c.builder.CreateInsertValue(tuple, commaOk, 1, "")                                              // insert 'comma ok' boolean
-		return tuple, nil
+		return tuple
 	} else {
 		// This is kind of dirty as the branch above becomes mostly useless,
 		// but hopefully this gets optimized away.
 		c.createRuntimeCall("interfaceTypeAssert", []llvm.Value{commaOk}, "")
-		return phi, nil
+		return phi
 	}
 }
 
 // getInvokeCall creates and returns the function pointer and parameters of an
 // interface call. It can be used in a call or defer instruction.
-func (c *Compiler) getInvokeCall(frame *Frame, instr *ssa.CallCommon) (llvm.Value, []llvm.Value, error) {
+func (c *Compiler) getInvokeCall(frame *Frame, instr *ssa.CallCommon) (llvm.Value, []llvm.Value) {
 	// Call an interface method with dynamic dispatch.
-	itf, err := c.parseExpr(frame, instr.Value) // interface
-	if err != nil {
-		return llvm.Value{}, nil, err
-	}
+	itf := c.getValue(frame, instr.Value) // interface
 
-	llvmFnType, err := c.getLLVMType(instr.Method.Type())
-	if err != nil {
-		return llvm.Value{}, nil, err
-	}
-	// getLLVMType() has created a closure type for us, but we don't actually
-	// want a closure type as an interface call can never be a closure call. So
-	// extract the function pointer type from the closure.
-	llvmFnType = llvmFnType.Subtypes()[1]
+	llvmFnType := c.getRawFuncType(instr.Method.Type().(*types.Signature))
 
 	typecode := c.builder.CreateExtractValue(itf, 0, "invoke.typecode")
 	values := []llvm.Value{
@@ -411,16 +406,12 @@ func (c *Compiler) getInvokeCall(frame *Frame, instr *ssa.CallCommon) (llvm.Valu
 		c.getMethodSignature(instr.Method),
 	}
 	fn := c.createRuntimeCall("interfaceMethod", values, "invoke.func")
-	fnCast := c.builder.CreateBitCast(fn, llvmFnType, "invoke.func.cast")
+	fnCast := c.builder.CreateIntToPtr(fn, llvmFnType, "invoke.func.cast")
 	receiverValue := c.builder.CreateExtractValue(itf, 1, "invoke.func.receiver")
 
 	args := []llvm.Value{receiverValue}
 	for _, arg := range instr.Args {
-		val, err := c.parseExpr(frame, arg)
-		if err != nil {
-			return llvm.Value{}, nil, err
-		}
-		args = append(args, val)
+		args = append(args, c.getValue(frame, arg))
 	}
 	// Add the context parameter. An interface call never takes a context but we
 	// have to supply the parameter anyway.
@@ -428,7 +419,7 @@ func (c *Compiler) getInvokeCall(frame *Frame, instr *ssa.CallCommon) (llvm.Valu
 	// Add the parent goroutine handle.
 	args = append(args, llvm.Undef(c.i8ptrType))
 
-	return fnCast, args, nil
+	return fnCast, args
 }
 
 // interfaceInvokeWrapper keeps some state between getInterfaceInvokeWrapper and
@@ -444,19 +435,16 @@ type interfaceInvokeWrapper struct {
 // the underlying value, dereferences it, and calls the real method. This
 // wrapper is only needed when the interface value actually doesn't fit in a
 // pointer and a pointer to the value must be created.
-func (c *Compiler) getInterfaceInvokeWrapper(f *ir.Function) (llvm.Value, error) {
+func (c *Compiler) getInterfaceInvokeWrapper(f *ir.Function) llvm.Value {
 	wrapperName := f.LinkName() + "$invoke"
 	wrapper := c.mod.NamedFunction(wrapperName)
 	if !wrapper.IsNil() {
 		// Wrapper already created. Return it directly.
-		return wrapper, nil
+		return wrapper
 	}
 
 	// Get the expanded receiver type.
-	receiverType, err := c.getLLVMType(f.Params[0].Type())
-	if err != nil {
-		return llvm.Value{}, err
-	}
+	receiverType := c.getLLVMType(f.Params[0].Type())
 	expandedReceiverType := c.expandFormalParamType(receiverType)
 
 	// Does this method even need any wrapping?
@@ -465,7 +453,7 @@ func (c *Compiler) getInterfaceInvokeWrapper(f *ir.Function) (llvm.Value, error)
 		// Casting a function signature to a different signature and calling it
 		// with a receiver pointer bitcasted to *i8 (as done in calls on an
 		// interface) is hopefully a safe (defined) operation.
-		return f.LLVMFn, nil
+		return f.LLVMFn
 	}
 
 	// create wrapper function
@@ -473,17 +461,20 @@ func (c *Compiler) getInterfaceInvokeWrapper(f *ir.Function) (llvm.Value, error)
 	paramTypes := append([]llvm.Type{c.i8ptrType}, fnType.ParamTypes()[len(expandedReceiverType):]...)
 	wrapFnType := llvm.FunctionType(fnType.ReturnType(), paramTypes, false)
 	wrapper = llvm.AddFunction(c.mod, wrapperName, wrapFnType)
+	if f.LLVMFn.LastParam().Name() == "parentHandle" {
+		wrapper.LastParam().SetName("parentHandle")
+	}
 	c.interfaceInvokeWrappers = append(c.interfaceInvokeWrappers, interfaceInvokeWrapper{
 		fn:           f,
 		wrapper:      wrapper,
 		receiverType: receiverType,
 	})
-	return wrapper, nil
+	return wrapper
 }
 
 // createInterfaceInvokeWrapper finishes the work of getInterfaceInvokeWrapper,
 // see that function for details.
-func (c *Compiler) createInterfaceInvokeWrapper(state interfaceInvokeWrapper) error {
+func (c *Compiler) createInterfaceInvokeWrapper(state interfaceInvokeWrapper) {
 	wrapper := state.wrapper
 	fn := state.fn
 	receiverType := state.receiverType
@@ -491,12 +482,9 @@ func (c *Compiler) createInterfaceInvokeWrapper(state interfaceInvokeWrapper) er
 	wrapper.SetUnnamedAddr(true)
 
 	// add debug info if needed
-	if c.Debug {
+	if c.Debug() {
 		pos := c.ir.Program.Fset.Position(fn.Pos())
-		difunc, err := c.attachDebugInfoRaw(fn, wrapper, "$invoke", pos.Filename, pos.Line)
-		if err != nil {
-			return err
-		}
+		difunc := c.attachDebugInfoRaw(fn, wrapper, "$invoke", pos.Filename, pos.Line)
 		c.builder.SetCurrentDebugLocation(uint(pos.Line), uint(pos.Column), difunc, llvm.Metadata{})
 	}
 
@@ -504,28 +492,7 @@ func (c *Compiler) createInterfaceInvokeWrapper(state interfaceInvokeWrapper) er
 	block := c.ctx.AddBasicBlock(wrapper, "entry")
 	c.builder.SetInsertPointAtEnd(block)
 
-	var receiverPtr llvm.Value
-	if c.targetData.TypeAllocSize(receiverType) > c.targetData.TypeAllocSize(c.i8ptrType) {
-		// The receiver is passed in using a pointer. We have to load it here
-		// and pass it by value to the real function.
-
-		// Load the underlying value.
-		receiverPtrType := llvm.PointerType(receiverType, 0)
-		receiverPtr = c.builder.CreateBitCast(wrapper.Param(0), receiverPtrType, "receiver.ptr")
-	} else {
-		// The value is stored in the interface, but it is of type struct which
-		// is expanded to multiple parameters (e.g. {i8, i8}). So we have to
-		// receive the struct as parameter, expand it, and pass it on to the
-		// real function.
-
-		// Cast the passed-in i8* to the struct value (using an alloca) and
-		// extract its values.
-		alloca := c.builder.CreateAlloca(c.i8ptrType, "receiver.alloca")
-		c.builder.CreateStore(wrapper.Param(0), alloca)
-		receiverPtr = c.builder.CreateBitCast(alloca, llvm.PointerType(receiverType, 0), "receiver.ptr")
-	}
-
-	receiverValue := c.builder.CreateLoad(receiverPtr, "receiver")
+	receiverValue := c.emitPointerUnpack(wrapper.Param(0), []llvm.Type{receiverType})[0]
 	params := append(c.expandFormalParam(receiverValue), wrapper.Params()[1:]...)
 	if fn.LLVMFn.Type().ElementType().ReturnType().TypeKind() == llvm.VoidTypeKind {
 		c.builder.CreateCall(fn.LLVMFn, params, "")
@@ -534,6 +501,4 @@ func (c *Compiler) createInterfaceInvokeWrapper(state interfaceInvokeWrapper) er
 		ret := c.builder.CreateCall(fn.LLVMFn, params, "ret")
 		c.builder.CreateRet(ret)
 	}
-
-	return nil
 }

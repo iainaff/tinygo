@@ -2,6 +2,13 @@ package main
 
 type MySlice [32]byte
 
+type myUint8 uint8
+
+// Indexing into slice with named type (regression test).
+var array = [4]int{
+	myUint8(2): 3,
+}
+
 func main() {
 	l := 5
 	foo := []int{1, 2, 4, 5}
@@ -13,17 +20,17 @@ func main() {
 	println("sum foo:", sum(foo))
 
 	// creating a slice with uncommon len, cap types
-	assert(len(make([]int, int(2), int(3))) == 2)
-	assert(len(make([]int, int8(2), int8(3))) == 2)
-	assert(len(make([]int, int16(2), int16(3))) == 2)
-	assert(len(make([]int, int32(2), int32(3))) == 2)
-	assert(len(make([]int, int64(2), int64(3))) == 2)
-	assert(len(make([]int, uint(2), uint(3))) == 2)
-	assert(len(make([]int, uint8(2), uint8(3))) == 2)
-	assert(len(make([]int, uint16(2), uint16(3))) == 2)
-	assert(len(make([]int, uint32(2), uint32(3))) == 2)
-	assert(len(make([]int, uint64(2), uint64(3))) == 2)
-	assert(len(make([]int, uintptr(2), uintptr(3))) == 2)
+	assert(len(make([]int, makeInt(2), makeInt(3))) == 2)
+	assert(len(make([]int, makeInt8(2), makeInt8(3))) == 2)
+	assert(len(make([]int, makeInt16(2), makeInt16(3))) == 2)
+	assert(len(make([]int, makeInt32(2), makeInt32(3))) == 2)
+	assert(len(make([]int, makeInt64(2), makeInt64(3))) == 2)
+	assert(len(make([]int, makeUint(2), makeUint(3))) == 2)
+	assert(len(make([]int, makeUint8(2), makeUint8(3))) == 2)
+	assert(len(make([]int, makeUint16(2), makeUint16(3))) == 2)
+	assert(len(make([]int, makeUint32(2), makeUint32(3))) == 2)
+	assert(len(make([]int, makeUint64(2), makeUint64(3))) == 2)
+	assert(len(make([]int, makeUintptr(2), makeUintptr(3))) == 2)
 
 	// indexing into a slice with uncommon index types
 	assert(foo[int(2)] == 4)
@@ -64,6 +71,33 @@ func main() {
 	assert(len(arr[uint32(1):uint32(3)]) == 2)
 	assert(len(arr[uint64(1):uint64(3)]) == 2)
 	assert(len(arr[uintptr(1):uintptr(3)]) == 2)
+
+	// slicing with max parameter (added in Go 1.2)
+	longfoo := []int{1, 2, 4, 5, 10, 11}
+	assert(cap(longfoo[int(1):int(3):int(5)]) == 4)
+	assert(cap(longfoo[int8(1):int8(3):int8(5)]) == 4)
+	assert(cap(longfoo[int16(1):int16(3):int16(5)]) == 4)
+	assert(cap(longfoo[int32(1):int32(3):int32(5)]) == 4)
+	assert(cap(longfoo[int64(1):int64(3):int64(5)]) == 4)
+	assert(cap(longfoo[uint(1):uint(3):uint(5)]) == 4)
+	assert(cap(longfoo[uint8(1):uint8(3):uint8(5)]) == 4)
+	assert(cap(longfoo[uint16(1):uint16(3):uint16(5)]) == 4)
+	assert(cap(longfoo[uint32(1):uint32(3):uint32(5)]) == 4)
+	assert(cap(longfoo[uint64(1):uint64(3):uint64(5)]) == 4)
+	assert(cap(longfoo[uintptr(1):uintptr(3):uintptr(5)]) == 4)
+
+	// slicing an array with max parameter (added in Go 1.2)
+	assert(cap(arr[int(1):int(2):int(4)]) == 3)
+	assert(cap(arr[int8(1):int8(2):int8(4)]) == 3)
+	assert(cap(arr[int16(1):int16(2):int16(4)]) == 3)
+	assert(cap(arr[int32(1):int32(2):int32(4)]) == 3)
+	assert(cap(arr[int64(1):int64(2):int64(4)]) == 3)
+	assert(cap(arr[uint(1):uint(2):uint(4)]) == 3)
+	assert(cap(arr[uint8(1):uint8(2):uint8(4)]) == 3)
+	assert(cap(arr[uint16(1):uint16(2):uint16(4)]) == 3)
+	assert(cap(arr[uint32(1):uint32(2):uint32(4)]) == 3)
+	assert(cap(arr[uint64(1):uint64(2):uint64(4)]) == 3)
+	assert(cap(arr[uintptr(1):uintptr(2):uintptr(4)]) == 3)
 
 	// copy
 	println("copy foo -> bar:", copy(bar, foo))
@@ -120,3 +154,18 @@ func assert(ok bool) {
 		panic("assert failed")
 	}
 }
+
+// Helper functions used to hide const values from the compiler during IR
+// construction.
+
+func makeInt(x int) int             { return x }
+func makeInt8(x int8) int8          { return x }
+func makeInt16(x int16) int16       { return x }
+func makeInt32(x int32) int32       { return x }
+func makeInt64(x int64) int64       { return x }
+func makeUint(x uint) uint          { return x }
+func makeUint8(x uint8) uint8       { return x }
+func makeUint16(x uint16) uint16    { return x }
+func makeUint32(x uint32) uint32    { return x }
+func makeUint64(x uint64) uint64    { return x }
+func makeUintptr(x uintptr) uintptr { return x }

@@ -1,0 +1,28 @@
+{
+	"llvm-target": "riscv32--none",
+	"goos": "linux",
+	"goarch": "arm",
+	"build-tags": ["tinygo.riscv", "baremetal", "linux", "arm"],
+	"gc": "conservative",
+	"compiler": "clang",
+	"linker": "ld.lld",
+	"rtlib": "compiler-rt",
+	"cflags": [
+		"--target=riscv32--none",
+		"-march=rv32imac",
+		"-mabi=ilp32",
+		"-Os",
+		"-Werror",
+		"-nostdinc",
+		"-fno-exceptions", "-fno-unwind-tables",
+		"-ffunction-sections", "-fdata-sections"
+	],
+	"ldflags": [
+		"-melf32lriscv",
+		"--gc-sections"
+	],
+	"extra-files": [
+		"src/device/riscv/start.S"
+	],
+	"gdb": "riscv64-unknown-elf-gdb"
+}

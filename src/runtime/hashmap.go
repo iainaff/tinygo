@@ -6,6 +6,7 @@ package runtime
 //     https://golang.org/src/runtime/map.go
 
 import (
+	"reflect"
 	"unsafe"
 )
 
@@ -60,14 +61,20 @@ func hashmapTopHash(hash uint32) uint8 {
 }
 
 // Create a new hashmap with the given keySize and valueSize.
-func hashmapMake(keySize, valueSize uint8) *hashmap {
+func hashmapMake(keySize, valueSize uint8, sizeHint uintptr) *hashmap {
+	numBuckets := sizeHint / 8
+	bucketBits := uint8(0)
+	for numBuckets != 0 {
+		numBuckets /= 2
+		bucketBits++
+	}
 	bucketBufSize := unsafe.Sizeof(hashmapBucket{}) + uintptr(keySize)*8 + uintptr(valueSize)*8
-	bucket := alloc(bucketBufSize)
+	buckets := alloc(bucketBufSize * (1 << bucketBits))
 	return &hashmap{
-		buckets:    bucket,
+		buckets:    buckets,
 		keySize:    keySize,
 		valueSize:  valueSize,
-		bucketBits: 0,
+		bucketBits: bucketBits,
 	}
 }
 
@@ -83,13 +90,20 @@ func hashmapLen(m *hashmap) int {
 // Set a specified key to a given value. Grow the map if necessary.
 //go:nobounds
 func hashmapSet(m *hashmap, key unsafe.Pointer, value unsafe.Pointer, hash uint32, keyEqual func(x, y unsafe.Pointer, n uintptr) bool) {
+	tophash := hashmapTopHash(hash)
+
+	if m.buckets == nil {
+		// No bucket was allocated yet, do so now.
+		m.buckets = unsafe.Pointer(hashmapInsertIntoNewBucket(m, key, value, tophash))
+		return
+	}
+
 	numBuckets := uintptr(1) << m.bucketBits
 	bucketNumber := (uintptr(hash) & (numBuckets - 1))
 	bucketSize := unsafe.Sizeof(hashmapBucket{}) + uintptr(m.keySize)*8 + uintptr(m.valueSize)*8
 	bucketAddr := uintptr(m.buckets) + bucketSize*bucketNumber
 	bucket := (*hashmapBucket)(unsafe.Pointer(bucketAddr))
-
-	tophash := hashmapTopHash(hash)
+	var lastBucket *hashmapBucket
 
 	// See whether the key already exists somewhere.
 	var emptySlotKey unsafe.Pointer
@@ -98,9 +112,9 @@ func hashmapSet(m *hashmap, key unsafe.Pointer, value unsafe.Pointer, hash uint3
 	for bucket != nil {
 		for i := uintptr(0); i < 8; i++ {
 			slotKeyOffset := unsafe.Sizeof(hashmapBucket{}) + uintptr(m.keySize)*uintptr(i)
-			slotKey := unsafe.Pointer(bucketAddr + slotKeyOffset)
+			slotKey := unsafe.Pointer(uintptr(unsafe.Pointer(bucket)) + slotKeyOffset)
 			slotValueOffset := unsafe.Sizeof(hashmapBucket{}) + uintptr(m.keySize)*8 + uintptr(m.valueSize)*uintptr(i)
-			slotValue := unsafe.Pointer(bucketAddr + slotValueOffset)
+			slotValue := unsafe.Pointer(uintptr(unsafe.Pointer(bucket)) + slotValueOffset)
 			if bucket.tophash[i] == 0 && emptySlotKey == nil {
 				// Found an empty slot, store it for if we couldn't find an
 				// existing slot.
@@ -109,7 +123,7 @@ func hashmapSet(m *hashmap, key unsafe.Pointer, value unsafe.Pointer, hash uint3
 				emptySlotTophash = &bucket.tophash[i]
 			}
 			if bucket.tophash[i] == tophash {
-				// Could be an existing value that's the same.
+				// Could be an existing key that's the same.
 				if keyEqual(key, slotKey, uintptr(m.keySize)) {
 					// found same key, replace it
 					memcpy(slotValue, value, uintptr(m.valueSize))
@@ -117,16 +131,37 @@ func hashmapSet(m *hashmap, key unsafe.Pointer, value unsafe.Pointer, hash uint3
 				}
 			}
 		}
+		lastBucket = bucket
 		bucket = bucket.next
 	}
-	if emptySlotKey != nil {
-		m.count++
-		memcpy(emptySlotKey, key, uintptr(m.keySize))
-		memcpy(emptySlotValue, value, uintptr(m.valueSize))
-		*emptySlotTophash = tophash
+	if emptySlotKey == nil {
+		// Add a new bucket to the bucket chain.
+		// TODO: rebalance if necessary to avoid O(n) insert and lookup time.
+		lastBucket.next = (*hashmapBucket)(hashmapInsertIntoNewBucket(m, key, value, tophash))
 		return
 	}
-	panic("todo: hashmap: grow bucket")
+	m.count++
+	memcpy(emptySlotKey, key, uintptr(m.keySize))
+	memcpy(emptySlotValue, value, uintptr(m.valueSize))
+	*emptySlotTophash = tophash
+}
+
+// hashmapInsertIntoNewBucket creates a new bucket, inserts the given key and
+// value into the bucket, and returns a pointer to this bucket.
+func hashmapInsertIntoNewBucket(m *hashmap, key, value unsafe.Pointer, tophash uint8) *hashmapBucket {
+	bucketBufSize := unsafe.Sizeof(hashmapBucket{}) + uintptr(m.keySize)*8 + uintptr(m.valueSize)*8
+	bucketBuf := alloc(bucketBufSize)
+	// Insert into the first slot, which is empty as it has just been allocated.
+	slotKeyOffset := unsafe.Sizeof(hashmapBucket{})
+	slotKey := unsafe.Pointer(uintptr(bucketBuf) + slotKeyOffset)
+	slotValueOffset := unsafe.Sizeof(hashmapBucket{}) + uintptr(m.keySize)*8
+	slotValue := unsafe.Pointer(uintptr(bucketBuf) + slotValueOffset)
+	m.count++
+	memcpy(slotKey, key, uintptr(m.keySize))
+	memcpy(slotValue, value, uintptr(m.valueSize))
+	bucket := (*hashmapBucket)(bucketBuf)
+	bucket.tophash[0] = tophash
+	return bucket
 }
 
 // Get the value of a specified key, or zero the value if not found.
@@ -283,4 +318,75 @@ func hashmapStringGet(m *hashmap, key string, value unsafe.Pointer) bool {
 func hashmapStringDelete(m *hashmap, key string) {
 	hash := hashmapStringHash(key)
 	hashmapDelete(m, unsafe.Pointer(&key), hash, hashmapStringEqual)
+}
+
+// Hashmap with interface keys (for everything else).
+
+func hashmapInterfaceHash(itf interface{}) uint32 {
+	x := reflect.ValueOf(itf)
+	if x.Type() == 0 {
+		return 0 // nil interface
+	}
+
+	value := (*_interface)(unsafe.Pointer(&itf)).value
+	ptr := value
+	if x.Type().Size() <= unsafe.Sizeof(uintptr(0)) {
+		// Value fits in pointer, so it's directly stored in the pointer.
+		ptr = unsafe.Pointer(&value)
+	}
+
+	switch x.Type().Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return hashmapHash(ptr, x.Type().Size())
+	case reflect.Bool, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return hashmapHash(ptr, x.Type().Size())
+	case reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
+		// It should be possible to just has the contents. However, NaN != NaN
+		// so if you're using lots of NaNs as map keys (you shouldn't) then hash
+		// time may become exponential. To fix that, it would be better to
+		// return a random number instead:
+		// https://research.swtch.com/randhash
+		return hashmapHash(ptr, x.Type().Size())
+	case reflect.String:
+		return hashmapStringHash(x.String())
+	case reflect.Chan, reflect.Ptr, reflect.UnsafePointer:
+		// It might seem better to just return the pointer, but that won't
+		// result in an evenly distributed hashmap. Instead, hash the pointer
+		// like most other types.
+		return hashmapHash(ptr, x.Type().Size())
+	case reflect.Array:
+		var hash uint32
+		for i := 0; i < x.Len(); i++ {
+			hash |= hashmapInterfaceHash(x.Index(i).Interface())
+		}
+		return hash
+	case reflect.Struct:
+		var hash uint32
+		for i := 0; i < x.NumField(); i++ {
+			hash |= hashmapInterfaceHash(x.Field(i).Interface())
+		}
+		return hash
+	default:
+		runtimePanic("comparing un-comparable type")
+		return 0 // unreachable
+	}
+}
+
+func hashmapInterfaceEqual(x, y unsafe.Pointer, n uintptr) bool {
+	return *(*interface{})(x) == *(*interface{})(y)
+}
+
+func hashmapInterfaceSet(m *hashmap, key interface{}, value unsafe.Pointer) {
+	hash := hashmapInterfaceHash(key)
+	hashmapSet(m, unsafe.Pointer(&key), value, hash, hashmapInterfaceEqual)
+}
+
+func hashmapInterfaceGet(m *hashmap, key interface{}, value unsafe.Pointer) bool {
+	hash := hashmapInterfaceHash(key)
+	return hashmapGet(m, unsafe.Pointer(&key), value, hash, hashmapInterfaceEqual)
+}
+
+func hashmapInterfaceDelete(m *hashmap, key interface{}) {
+	hash := hashmapInterfaceHash(key)
+	hashmapDelete(m, unsafe.Pointer(&key), hash, hashmapInterfaceEqual)
 }

@@ -9,6 +9,23 @@ type (
 	myint    int
 	myslice  []byte
 	myslice2 []myint
+	mychan   chan int
+	myptr    *int
+	point    struct {
+		X int16
+		Y int16
+	}
+	mystruct struct {
+		n    int `foo:"bar"`
+		some point
+		zero struct{}
+		buf  []byte
+		Buf  []byte
+	}
+	linkedList struct {
+		next *linkedList `description:"chain"`
+		foo  int
+	}
 )
 
 func main() {
@@ -55,10 +72,12 @@ func main() {
 		unsafe.Pointer(new(int)),
 		// channels
 		zeroChan,
+		mychan(zeroChan),
 		// pointers
 		new(int),
 		new(error),
 		&n,
+		myptr(new(int)),
 		// slices
 		[]byte{1, 2, 3},
 		make([]uint8, 2, 5),
@@ -70,8 +89,10 @@ func main() {
 		[]float64{1, 1.64},
 		[]complex64{1, 1.64 + 0.3i},
 		[]complex128{1, 1.128 + 0.4i},
+		myslice{5, 3, 11},
 		// array
-		[4]int{1, 2, 3, 4},
+		[3]int64{5, 8, 2},
+		[2]uint8{3, 5},
 		// functions
 		zeroFunc,
 		emptyFunc,
@@ -81,24 +102,40 @@ func main() {
 		// structs
 		struct{}{},
 		struct{ error }{},
+		struct {
+			a uint8
+			b int16
+			c int8
+		}{42, 321, 123},
+		mystruct{5, point{-5, 3}, struct{}{}, []byte{'G', 'o'}, []byte{'X'}},
+		&linkedList{
+			foo: 42,
+		},
 	} {
 		showValue(reflect.ValueOf(v), "")
 	}
 
 	// test sizes
 	println("\nsizes:")
-	println("int8", int(reflect.TypeOf(int8(0)).Size()))
-	println("int16", int(reflect.TypeOf(int16(0)).Size()))
-	println("int32", int(reflect.TypeOf(int32(0)).Size()))
-	println("int64", int(reflect.TypeOf(int64(0)).Size()))
-	println("uint8", int(reflect.TypeOf(uint8(0)).Size()))
-	println("uint16", int(reflect.TypeOf(uint16(0)).Size()))
-	println("uint32", int(reflect.TypeOf(uint32(0)).Size()))
-	println("uint64", int(reflect.TypeOf(uint64(0)).Size()))
-	println("float32", int(reflect.TypeOf(float32(0)).Size()))
-	println("float64", int(reflect.TypeOf(float64(0)).Size()))
-	println("complex64", int(reflect.TypeOf(complex64(0)).Size()))
-	println("complex128", int(reflect.TypeOf(complex128(0)).Size()))
+	for _, tc := range []struct {
+		name string
+		rt   reflect.Type
+	}{
+		{"int8", reflect.TypeOf(int8(0))},
+		{"int16", reflect.TypeOf(int16(0))},
+		{"int32", reflect.TypeOf(int32(0))},
+		{"int64", reflect.TypeOf(int64(0))},
+		{"uint8", reflect.TypeOf(uint8(0))},
+		{"uint16", reflect.TypeOf(uint16(0))},
+		{"uint32", reflect.TypeOf(uint32(0))},
+		{"uint64", reflect.TypeOf(uint64(0))},
+		{"float32", reflect.TypeOf(float32(0))},
+		{"float64", reflect.TypeOf(float64(0))},
+		{"complex64", reflect.TypeOf(complex64(0))},
+		{"complex128", reflect.TypeOf(complex128(0))},
+	} {
+		println(tc.name, int(tc.rt.Size()), tc.rt.Bits())
+	}
 	assertSize(reflect.TypeOf(uintptr(0)).Size() == unsafe.Sizeof(uintptr(0)), "uintptr")
 	assertSize(reflect.TypeOf("").Size() == unsafe.Sizeof(""), "string")
 	assertSize(reflect.TypeOf(new(int)).Size() == unsafe.Sizeof(new(int)), "*int")
@@ -217,6 +254,16 @@ func main() {
 	if rv.Len() != 2 || rv.Index(0).Int() != 3 {
 		panic("slice was changed while setting part of it")
 	}
+
+	// Test types that are created in reflect and never created elsewhere in a
+	// value-to-interface conversion.
+	v := reflect.ValueOf(new(unreferencedType))
+	switch v.Elem().Interface().(type) {
+	case unreferencedType:
+		println("type assertion succeeded for unreferenced type")
+	default:
+		println("type assertion failed (but should succeed)")
+	}
 }
 
 func emptyFunc() {
@@ -230,6 +277,9 @@ func showValue(rv reflect.Value, indent string) {
 	print(indent+"reflect type: ", rt.Kind().String())
 	if rv.CanSet() {
 		print(" settable=", rv.CanSet())
+	}
+	if !rt.Comparable() {
+		print(" comparable=false")
 	}
 	println()
 	switch rt.Kind() {
@@ -251,7 +301,10 @@ func showValue(rv reflect.Value, indent string) {
 	case reflect.UnsafePointer:
 		println(indent+"  pointer:", rv.Pointer() != 0)
 	case reflect.Array:
-		println(indent + "  array")
+		println(indent+"  array:", rt.Len(), rt.Elem().Kind().String(), int(rt.Size()))
+		for i := 0; i < rv.Len(); i++ {
+			showValue(rv.Index(i), indent+"  ")
+		}
 	case reflect.Chan:
 		println(indent+"  chan:", rt.Elem().Kind().String())
 		println(indent+"  nil:", rv.IsNil())
@@ -279,7 +332,14 @@ func showValue(rv reflect.Value, indent string) {
 			showValue(rv.Index(i), indent+"  ")
 		}
 	case reflect.Struct:
-		println(indent + "  struct")
+		println(indent+"  struct:", rt.NumField())
+		for i := 0; i < rv.NumField(); i++ {
+			field := rt.Field(i)
+			println(indent+"  field:", i, field.Name)
+			println(indent+"  tag:", field.Tag)
+			println(indent+"  embedded:", field.Anonymous)
+			showValue(rv.Field(i), indent+"  ")
+		}
 	default:
 		println(indent + "  unknown type kind!")
 	}
@@ -290,3 +350,5 @@ func assertSize(ok bool, typ string) {
 		panic("size mismatch for type " + typ)
 	}
 }
+
+type unreferencedType int

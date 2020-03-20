@@ -31,10 +31,10 @@ const (
 )
 
 //go:extern _sbss
-var _sbss unsafe.Pointer
+var _sbss [0]byte
 
 //go:extern _ebss
-var _ebss unsafe.Pointer
+var _ebss [0]byte
 
 //go:export main
 func main() {
@@ -47,10 +47,10 @@ func main() {
 
 func preinit() {
 	// Initialize .bss: zero-initialized global variables.
-	ptr := uintptr(unsafe.Pointer(&_sbss))
-	for ptr != uintptr(unsafe.Pointer(&_ebss)) {
-		*(*uint8)(unsafe.Pointer(ptr)) = 0
-		ptr += 1
+	ptr := unsafe.Pointer(&_sbss)
+	for ptr != unsafe.Pointer(&_ebss) {
+		*(*uint8)(ptr) = 0
+		ptr = unsafe.Pointer(uintptr(ptr) + 1)
 	}
 }
 

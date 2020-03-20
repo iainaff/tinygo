@@ -1,10 +1,10 @@
 {
-	"build-tags": ["avr", "js", "wasm"],
-	"goos": "js",
-	"goarch": "wasm",
+	"build-tags": ["avr", "baremetal", "linux", "arm"],
+	"goos": "linux",
+	"goarch": "arm",
 	"compiler": "avr-gcc",
+	"gc": "conservative",
 	"linker": "avr-gcc",
-	"objcopy": "avr-objcopy",
 	"ldflags": [
 		"-T", "targets/avr.ld",
 		"-Wl,--gc-sections"

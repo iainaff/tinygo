@@ -1,0 +1,95 @@
+// +build sam,atsamd21,trinket_m0
+
+package machine
+
+import (
+	"device/sam"
+	"runtime/interrupt"
+)
+
+// used to reset into bootloader
+const RESET_MAGIC_VALUE = 0xf01669ef
+
+// GPIO Pins
+const (
+	D0  = PA08 // PWM available
+	D1  = PA02
+	D2  = PA09 // PWM available
+	D3  = PA07 // PWM available / UART0 RX
+	D4  = PA06 // PWM available / UART0 TX
+	D13 = PA10 // LED
+)
+
+// Analog pins
+const (
+	A0 = D1
+	A1 = D2
+	A2 = D0
+	A3 = D3
+	A4 = D4
+)
+
+const (
+	LED = D13
+)
+
+// UART0 aka USBCDC pins
+const (
+	USBCDC_DM_PIN = PA24
+	USBCDC_DP_PIN = PA25
+)
+
+// UART1 pins
+const (
+	UART_TX_PIN = D4
+	UART_RX_PIN = D3
+)
+
+// UART1 on the Trinket M0.
+var (
+	UART1 = UART{
+		Buffer: NewRingBuffer(),
+		Bus:    sam.SERCOM0_USART,
+		SERCOM: 0,
+	}
+)
+
+func init() {
+	UART1.Interrupt = interrupt.New(sam.IRQ_SERCOM0, UART1.handleInterrupt)
+}
+
+// SPI pins
+const (
+	SPI0_SCK_PIN  = D3
+	SPI0_MOSI_PIN = D4
+	SPI0_MISO_PIN = D2
+)
+
+// SPI on the Trinket M0.
+var (
+	SPI0 = SPI{
+		Bus:    sam.SERCOM0_SPI,
+		SERCOM: 0,
+	}
+)
+
+// I2C pins
+const (
+	SDA_PIN = D0 // SDA
+	SCL_PIN = D2 // SCL
+)
+
+// I2C on the Trinket M0.
+var (
+	I2C0 = I2C{
+		Bus:    sam.SERCOM2_I2CM,
+		SERCOM: 2,
+	}
+)
+
+// I2S pins
+const (
+	I2S_SCK_PIN = PA10
+	I2S_SD_PIN  = PA08
+	I2S_WS_PIN  = NoPin // TODO: figure out what this is on Trinket M0.
+)

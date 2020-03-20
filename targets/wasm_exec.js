@@ -73,13 +73,6 @@
 
 	global.Go = class {
 		constructor() {
-			this.argv = ["js"];
-			this.env = {};
-			this.exit = (code) => {
-				if (code !== 0) {
-					console.warn("exit code:", code);
-				}
-			};
 			this._callbackTimeouts = new Map();
 			this._nextCallbackTimeoutID = 1;
 
@@ -188,31 +181,37 @@
 
 			const timeOrigin = Date.now() - performance.now();
 			this.importObject = {
-				env: {
-					io_get_stdout: function() {
-						return 1;
-					},
-
-					resource_write: function(fd, ptr, len) {
+				wasi_unstable: {
+					// https://github.com/bytecodealliance/wasmtime/blob/master/docs/WASI-api.md#__wasi_fd_write
+					fd_write: function(fd, iovs_ptr, iovs_len, nwritten_ptr) {
+						let nwritten = 0;
 						if (fd == 1) {
-							for (let i=0; i<len; i++) {
-								let c = mem().getUint8(ptr+i);
-								if (c == 13) { // CR
-									// ignore
-								} else if (c == 10) { // LF
-									// write line
-									let line = decoder.decode(new Uint8Array(logLine));
-									logLine = [];
-									console.log(line);
-								} else {
-									logLine.push(c);
+							for (let iovs_i=0; iovs_i<iovs_len;iovs_i++) {
+								let iov_ptr = iovs_ptr+iovs_i*8; // assuming wasm32
+								let ptr = mem().getUint32(iov_ptr + 0, true);
+								let len = mem().getUint32(iov_ptr + 4, true);
+								for (let i=0; i<len; i++) {
+									let c = mem().getUint8(ptr+i);
+									if (c == 13) { // CR
+										// ignore
+									} else if (c == 10) { // LF
+										// write line
+										let line = decoder.decode(new Uint8Array(logLine));
+										logLine = [];
+										console.log(line);
+									} else {
+										logLine.push(c);
+									}
 								}
 							}
 						} else {
 							console.error('invalid file descriptor:', fd);
 						}
+						mem().setUint32(nwritten_ptr, nwritten, true);
+						return 0;
 					},
-
+				},
+				env: {
 					// func ticks() float64
 					"runtime.ticks": () => {
 						return timeOrigin + performance.now();
@@ -247,14 +246,14 @@
 					},
 
 					// func valueIndex(v ref, i int) ref
-					//"syscall/js.valueIndex": (sp) => {
-					//	storeValue(sp + 24, Reflect.get(loadValue(sp + 8), getInt64(sp + 16)));
-					//},
+					"syscall/js.valueIndex": (ret_addr, v_addr, i) => {
+						storeValue(ret_addr, Reflect.get(loadValue(v_addr), i));
+					},
 
 					// valueSetIndex(v ref, i int, x ref)
-					//"syscall/js.valueSetIndex": (sp) => {
-					//	Reflect.set(loadValue(sp + 8), getInt64(sp + 16), loadValue(sp + 24));
-					//},
+					"syscall/js.valueSetIndex": (v_addr, i, x_addr) => {
+						Reflect.set(loadValue(v_addr), i, loadValue(x_addr));
+					},
 
 					// func valueCall(v ref, m string, args []ref) (ref, bool)
 					"syscall/js.valueCall": (ret_addr, v_addr, m_ptr, m_len, args_ptr, args_len, args_cap) => {
@@ -272,17 +271,17 @@
 					},
 
 					// func valueInvoke(v ref, args []ref) (ref, bool)
-					//"syscall/js.valueInvoke": (sp) => {
-					//	try {
-					//		const v = loadValue(sp + 8);
-					//		const args = loadSliceOfValues(sp + 16);
-					//		storeValue(sp + 40, Reflect.apply(v, undefined, args));
-					//		mem().setUint8(sp + 48, 1);
-					//	} catch (err) {
-					//		storeValue(sp + 40, err);
-					//		mem().setUint8(sp + 48, 0);
-					//	}
-					//},
+					"syscall/js.valueInvoke": (ret_addr, v_addr, args_ptr, args_len, args_cap) => {
+						try {
+							const v = loadValue(v_addr);
+							const args = loadSliceOfValues(args_ptr, args_len, args_cap);
+							storeValue(ret_addr, Reflect.apply(v, undefined, args));
+							mem().setUint8(ret_addr + 8, 1);
+						} catch (err) {
+							storeValue(ret_addr, err);
+							mem().setUint8(ret_addr + 8, 0);
+						}
+					},
 
 					// func valueNew(v ref, args []ref) (ref, bool)
 					"syscall/js.valueNew": (ret_addr, v_addr, args_ptr, args_len, args_cap) => {
@@ -298,9 +297,9 @@
 					},
 
 					// func valueLength(v ref) int
-					//"syscall/js.valueLength": (sp) => {
-					//	setInt64(sp + 16, parseInt(loadValue(sp + 8).length));
-					//},
+					"syscall/js.valueLength": (v_addr) => {
+						return loadValue(v_addr).length;
+					},
 
 					// valuePrepareString(v ref) (ref, int)
 					"syscall/js.valuePrepareString": (ret_addr, v_addr) => {
@@ -342,36 +341,6 @@
 
 			const mem = new DataView(this._inst.exports.memory.buffer)
 
-			// Pass command line arguments and environment variables to WebAssembly by writing them to the linear memory.
-			let offset = 4096;
-
-			const strPtr = (str) => {
-				let ptr = offset;
-				new Uint8Array(mem.buffer, offset, str.length + 1).set(encoder.encode(str + "\0"));
-				offset += str.length + (8 - (str.length % 8));
-				return ptr;
-			};
-
-			const argc = this.argv.length;
-
-			const argvPtrs = [];
-			this.argv.forEach((arg) => {
-				argvPtrs.push(strPtr(arg));
-			});
-
-			const keys = Object.keys(this.env).sort();
-			argvPtrs.push(keys.length);
-			keys.forEach((key) => {
-				argvPtrs.push(strPtr(`${key}=${this.env[key]}`));
-			});
-
-			const argv = offset;
-			argvPtrs.forEach((ptr) => {
-				mem.setUint32(offset, ptr, true);
-				mem.setUint32(offset + 4, 0, true);
-				offset += 8;
-			});
-
 			while (true) {
 				const callbackPromise = new Promise((resolve) => {
 					this._resolveCallbackPromise = () => {
@@ -381,7 +350,7 @@
 						setTimeout(resolve, 0); // make sure it is asynchronous
 					};
 				});
-				this._inst.exports.cwa_main(argc, argv);
+				this._inst.exports._start();
 				if (this.exited) {
 					break;
 				}
@@ -389,45 +358,39 @@
 			}
 		}
 
-		static _makeCallbackHelper(id, pendingCallbacks, go) {
-			return function () {
-				pendingCallbacks.push({ id: id, args: arguments });
-				go._resolveCallbackPromise();
-			};
+		_resume() {
+			if (this.exited) {
+				throw new Error("Go program has already exited");
+			}
+			this._inst.exports.resume();
+			if (this.exited) {
+				this._resolveExitPromise();
+			}
 		}
 
-		static _makeEventCallbackHelper(preventDefault, stopPropagation, stopImmediatePropagation, fn) {
-			return function (event) {
-				if (preventDefault) {
-					event.preventDefault();
-				}
-				if (stopPropagation) {
-					event.stopPropagation();
-				}
-				if (stopImmediatePropagation) {
-					event.stopImmediatePropagation();
-				}
-				fn(event);
+		_makeFuncWrapper(id) {
+			const go = this;
+			return function () {
+				const event = { id: id, this: this, args: arguments };
+				go._pendingEvent = event;
+				go._resume();
+				return event.result;
 			};
 		}
 	}
 
 	if (isNodeJS) {
-		if (process.argv.length < 3) {
+		if (process.argv.length != 3) {
 			process.stderr.write("usage: go_js_wasm_exec [wasm binary] [arguments]\n");
 			process.exit(1);
 		}
 
 		const go = new Go();
-		go.argv = process.argv.slice(2);
-		go.env = process.env;
-		go.exit = process.exit;
 		WebAssembly.instantiate(fs.readFileSync(process.argv[2]), go.importObject).then((result) => {
 			process.on("exit", (code) => { // Node.js exits if no callback is pending
 				if (code === 0 && !go.exited) {
 					// deadlock, make Go print error and stack traces
 					go._callbackShutdown = true;
-					go._inst.exports.run();
 				}
 			});
 			return go.run(result.instance);

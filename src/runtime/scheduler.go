@@ -1,61 +1,30 @@
 package runtime
 
-// This file implements the Go scheduler using coroutines.
-// A goroutine contains a whole stack. A coroutine is just a single function.
-// How do we use coroutines for goroutines, then?
-//   * Every function that contains a blocking call (like sleep) is marked
-//     blocking, and all it's parents (callers) are marked blocking as well
-//     transitively until the root (main.main or a go statement).
-//   * A blocking function that calls a non-blocking function is called as
-//     usual.
-//   * A blocking function that calls a blocking function passes its own
-//     coroutine handle as a parameter to the subroutine. When the subroutine
-//     returns, it will re-insert the parent into the scheduler.
-// Note that a goroutine is generally called a 'task' for brevity and because
-// that's the more common term among RTOSes. But a goroutine and a task are
-// basically the same thing. Although, the code often uses the word 'task' to
-// refer to both a coroutine and a goroutine, as most of the scheduler doesn't
-// care about the difference.
+// This file implements the TinyGo scheduler. This scheduler is a very simple
+// cooperative round robin scheduler, with a runqueue that contains a linked
+// list of goroutines (tasks) that should be run next, in order of when they
+// were added to the queue (first-in, first-out). It also contains a sleep queue
+// with sleeping goroutines in order of when they should be re-activated.
 //
-// For more background on coroutines in LLVM:
-// https://llvm.org/docs/Coroutines.html
+// The scheduler is used both for the coroutine based scheduler and for the task
+// based scheduler (see compiler/goroutine-lowering.go for a description). In
+// both cases, the 'task' type is used to represent one goroutine. In the case
+// of the task based scheduler, it literally is the goroutine itself: a pointer
+// to the bottom of the stack where some important fields are kept. In the case
+// of the coroutine-based scheduler, it is the coroutine pointer (a *i8 in
+// LLVM).
 
-import (
-	"unsafe"
-)
+import "unsafe"
 
 const schedulerDebug = false
 
-// A coroutine instance, wrapped here to provide some type safety. The value
-// must not be used directly, it is meant to be used as an opaque *i8 in LLVM.
-type coroutine uint8
-
-//go:export llvm.coro.resume
-func (t *coroutine) resume()
-
-//go:export llvm.coro.destroy
-func (t *coroutine) destroy()
-
-//go:export llvm.coro.done
-func (t *coroutine) done() bool
-
-//go:export llvm.coro.promise
-func (t *coroutine) _promise(alignment int32, from bool) unsafe.Pointer
-
-// Get the promise belonging to a task.
-func (t *coroutine) promise() *taskState {
-	return (*taskState)(t._promise(int32(unsafe.Alignof(taskState{})), false))
-}
-
-func makeGoroutine(*uint8) *uint8
-
-// State/promise of a task. Internally represented as:
+// State of a task. Internally represented as:
 //
-//     {i8* next, i1 commaOk, i32/i64 data}
+//     {i8* next, i8* ptr, i32/i64 data}
 type taskState struct {
-	next    *coroutine
-	commaOk bool // 'comma-ok' flag for channel receive operation
-	data    uint
+	next *task
+	ptr  unsafe.Pointer
+	data uint
 }
 
 // Queues used by the scheduler.
@@ -63,158 +32,217 @@ type taskState struct {
 // TODO: runqueueFront can be removed by making the run queue a circular linked
 // list. The runqueueBack will simply refer to the front in the 'next' pointer.
 var (
-	runqueueFront      *coroutine
-	runqueueBack       *coroutine
-	sleepQueue         *coroutine
+	runqueueFront      *task
+	runqueueBack       *task
+	sleepQueue         *task
 	sleepQueueBaseTime timeUnit
 )
 
 // Simple logging, for debugging.
 func scheduleLog(msg string) {
 	if schedulerDebug {
-		println(msg)
+		println("---", msg)
 	}
 }
 
 // Simple logging with a task pointer, for debugging.
-func scheduleLogTask(msg string, t *coroutine) {
+func scheduleLogTask(msg string, t *task) {
 	if schedulerDebug {
-		println(msg, t)
+		println("---", msg, t)
 	}
 }
 
-// Set the task to sleep for a given time.
-//
-// This is a compiler intrinsic.
-func sleepTask(caller *coroutine, duration int64) {
+// Simple logging with a channel and task pointer.
+func scheduleLogChan(msg string, ch *channel, t *task) {
 	if schedulerDebug {
-		println("  set sleep:", caller, uint(duration/tickMicros))
+		println("---", msg, ch, t)
 	}
-	promise := caller.promise()
-	promise.data = uint(duration / tickMicros) // TODO: longer durations
-	addSleepTask(caller)
+}
+
+// deadlock is called when a goroutine cannot proceed any more, but is in theory
+// not exited (so deferred calls won't run). This can happen for example in code
+// like this, that blocks forever:
+//
+//     select{}
+//go:noinline
+func deadlock() {
+	// call yield without requesting a wakeup
+	yield()
+	panic("unreachable")
+}
+
+// Goexit terminates the currently running goroutine. No other goroutines are affected.
+//
+// Unlike the main Go implementation, no deffered calls will be run.
+//go:inline
+func Goexit() {
+	// its really just a deadlock
+	deadlock()
+}
+
+// unblock unblocks a task and returns the next value
+func unblock(t *task) *task {
+	state := t.state()
+	next := state.next
+	state.next = nil
+	activateTask(t)
+	return next
+}
+
+// unblockChain unblocks the next task on the stack/queue, returning it
+// also updates the chain, putting the next element into the chain pointer
+// if the chain is used as a queue, tail is used as a pointer to the final insertion point
+// if the chain is used as a stack, tail should be nil
+func unblockChain(chain **task, tail ***task) *task {
+	t := *chain
+	if t == nil {
+		return nil
+	}
+	*chain = unblock(t)
+	if tail != nil && *chain == nil {
+		*tail = chain
+	}
+	return t
+}
+
+// dropChain drops a task from the given stack or queue
+// if the chain is used as a queue, tail is used as a pointer to the field containing a pointer to the next insertion point
+// if the chain is used as a stack, tail should be nil
+func dropChain(t *task, chain **task, tail ***task) {
+	for c := chain; *c != nil; c = &((*c).state().next) {
+		if *c == t {
+			next := (*c).state().next
+			if next == nil && tail != nil {
+				*tail = c
+			}
+			*c = next
+			return
+		}
+	}
+	panic("runtime: task not in chain")
+}
+
+// Pause the current task for a given time.
+//go:linkname sleep time.Sleep
+func sleep(duration int64) {
+	addSleepTask(getCoroutine(), duration)
+	yield()
+}
+
+func avrSleep(duration int64) {
+	sleepTicks(timeUnit(duration / tickMicros))
 }
 
 // Add a non-queued task to the run queue.
 //
 // This is a compiler intrinsic, and is called from a callee to reactivate the
 // caller.
-func activateTask(task *coroutine) {
-	if task == nil {
+func activateTask(t *task) {
+	if t == nil {
 		return
 	}
-	scheduleLogTask("  set runnable:", task)
-	runqueuePushBack(task)
+	scheduleLogTask("  set runnable:", t)
+	runqueuePushBack(t)
+}
+
+// getTaskStateData is a helper function to get the current .data field of the
+// goroutine state.
+//go:inline
+func getTaskStateData(t *task) uint {
+	return t.state().data
 }
 
 // Add this task to the end of the run queue. May also destroy the task if it's
 // done.
-func runqueuePushBack(t *coroutine) {
-	if t.done() {
-		scheduleLogTask("  destroy task:", t)
-		t.destroy()
-		return
-	}
+func runqueuePushBack(t *task) {
 	if schedulerDebug {
-		if t.promise().next != nil {
+		scheduleLogTask("  pushing back:", t)
+		if t.state().next != nil {
 			panic("runtime: runqueuePushBack: expected next task to be nil")
 		}
 	}
 	if runqueueBack == nil { // empty runqueue
-		scheduleLogTask("  add to runqueue front:", t)
 		runqueueBack = t
 		runqueueFront = t
 	} else {
-		scheduleLogTask("  add to runqueue back:", t)
-		lastTaskPromise := runqueueBack.promise()
-		lastTaskPromise.next = t
+		lastTaskState := runqueueBack.state()
+		lastTaskState.next = t
 		runqueueBack = t
 	}
 }
 
 // Get a task from the front of the run queue. Returns nil if there is none.
-func runqueuePopFront() *coroutine {
+func runqueuePopFront() *task {
 	t := runqueueFront
 	if t == nil {
 		return nil
 	}
-	if schedulerDebug {
-		println("    runqueuePopFront:", t)
-	}
-	promise := t.promise()
-	runqueueFront = promise.next
+	state := t.state()
+	runqueueFront = state.next
 	if runqueueFront == nil {
 		// Runqueue is empty now.
 		runqueueBack = nil
 	}
-	promise.next = nil
+	state.next = nil
 	return t
 }
 
 // Add this task to the sleep queue, assuming its state is set to sleeping.
-func addSleepTask(t *coroutine) {
+func addSleepTask(t *task, duration int64) {
 	if schedulerDebug {
-		if t.promise().next != nil {
+		println("  set sleep:", t, uint(duration/tickMicros))
+		if t.state().next != nil {
 			panic("runtime: addSleepTask: expected next task to be nil")
 		}
 	}
+	t.state().data = uint(duration / tickMicros) // TODO: longer durations
 	now := ticks()
 	if sleepQueue == nil {
 		scheduleLog("  -> sleep new queue")
-		// Create new linked list for the sleep queue.
-		sleepQueue = t
+
+		// set new base time
 		sleepQueueBaseTime = now
-		return
 	}
 
-	// Make sure promise.data is relative to the queue time base.
-	promise := t.promise()
-
-	// Insert at front of sleep queue.
-	if promise.data < sleepQueue.promise().data {
-		scheduleLog("  -> sleep at start")
-		sleepQueue.promise().data -= promise.data
-		promise.next = sleepQueue
-		sleepQueue = t
-		return
-	}
-
-	// Add to sleep queue (in the middle or at the end).
-	queueIndex := sleepQueue
-	for {
-		promise.data -= queueIndex.promise().data
-		if queueIndex.promise().next == nil || queueIndex.promise().data > promise.data {
-			if queueIndex.promise().next == nil {
-				scheduleLog("  -> sleep at end")
-				promise.next = nil
-			} else {
-				scheduleLog("  -> sleep in middle")
-				promise.next = queueIndex.promise().next
-				promise.next.promise().data -= promise.data
-			}
-			queueIndex.promise().next = t
+	// Add to sleep queue.
+	q := &sleepQueue
+	for ; *q != nil; q = &((*q).state()).next {
+		if t.state().data < (*q).state().data {
+			// this will finish earlier than the next - insert here
 			break
+		} else {
+			// this will finish later - adjust delay
+			t.state().data -= (*q).state().data
 		}
-		queueIndex = queueIndex.promise().next
 	}
+	if *q != nil {
+		// cut delay time between this sleep task and the next
+		(*q).state().data -= t.state().data
+	}
+	t.state().next = *q
+	*q = t
 }
 
 // Run the scheduler until all tasks have finished.
 func scheduler() {
 	// Main scheduler loop.
+	var now timeUnit
 	for {
-		scheduleLog("\n  schedule")
-		now := ticks()
+		scheduleLog("")
+		scheduleLog("  schedule")
+		if sleepQueue != nil {
+			now = ticks()
+		}
 
 		// Add tasks that are done sleeping to the end of the runqueue so they
 		// will be executed soon.
-		if sleepQueue != nil && now-sleepQueueBaseTime >= timeUnit(sleepQueue.promise().data) {
+		if sleepQueue != nil && now-sleepQueueBaseTime >= timeUnit(sleepQueue.state().data) {
 			t := sleepQueue
 			scheduleLogTask("  awake:", t)
-			promise := t.promise()
-			sleepQueueBaseTime += timeUnit(promise.data)
-			sleepQueue = promise.next
-			promise.next = nil
+			state := t.state()
+			sleepQueueBaseTime += timeUnit(state.data)
+			sleepQueue = state.next
+			state.next = nil
 			runqueuePushBack(t)
 		}
 
@@ -228,11 +256,14 @@ func scheduler() {
 				scheduleLog("  no tasks left!")
 				return
 			}
-			timeLeft := timeUnit(sleepQueue.promise().data) - (now - sleepQueueBaseTime)
+			timeLeft := timeUnit(sleepQueue.state().data) - (now - sleepQueueBaseTime)
 			if schedulerDebug {
 				println("  sleeping...", sleepQueue, uint(timeLeft))
+				for t := sleepQueue; t != nil; t = t.state().next {
+					println("    task sleeping:", t, timeUnit(t.state().data))
+				}
 			}
-			sleepTicks(timeUnit(timeLeft))
+			sleepTicks(timeLeft)
 			if asyncScheduler {
 				// The sleepTicks function above only sets a timeout at which
 				// point the scheduler will be called again. It does not really
@@ -243,8 +274,12 @@ func scheduler() {
 		}
 
 		// Run the given task.
-		scheduleLog("  <- runqueuePopFront")
 		scheduleLogTask("  run:", t)
 		t.resume()
 	}
+}
+
+func Gosched() {
+	runqueuePushBack(getCoroutine())
+	yield()
 }

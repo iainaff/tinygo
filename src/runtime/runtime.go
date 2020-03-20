@@ -10,7 +10,7 @@ const Compiler = "tinygo"
 // package.
 func initAll()
 
-// A function call to this function is replaced withone of the following,
+// A function call to this function is replaced with one of the following,
 // depending on whether the scheduler is necessary:
 //
 // Without scheduler:
@@ -79,17 +79,29 @@ func memequal(x, y unsafe.Pointer, n uintptr) bool {
 	return true
 }
 
-//go:linkname sleep time.Sleep
-func sleep(d int64) {
-	sleepTicks(timeUnit(d / tickMicros))
+func nanotime() int64 {
+	return int64(ticks()) * tickMicros
 }
+
+// timeOffset is how long the monotonic clock started after the Unix epoch. It
+// should be a positive integer under normal operation or zero when it has not
+// been set.
+var timeOffset int64
 
 //go:linkname now time.now
 func now() (sec int64, nsec int32, mono int64) {
-	mono = int64(ticks()) * tickMicros
-	sec = mono / (1000 * 1000 * 1000)
-	nsec = int32(mono - sec*(1000*1000*1000))
+	mono = nanotime()
+	sec = (mono + timeOffset) / (1000 * 1000 * 1000)
+	nsec = int32((mono + timeOffset) - sec*(1000*1000*1000))
 	return
+}
+
+// AdjustTimeOffset adds the given offset to the built-in time offset. A
+// positive value adds to the time (skipping some time), a negative value moves
+// the clock into the past.
+func AdjustTimeOffset(offset int64) {
+	// TODO: do this atomically?
+	timeOffset += offset
 }
 
 // Copied from the Go runtime source code.

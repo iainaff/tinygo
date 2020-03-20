@@ -7,13 +7,12 @@
 		"-mfloat-abi=soft",
 		"-Qunused-arguments",
 		"-DNRF52840_XXAA",
-		"-Ilib/CMSIS/CMSIS/Include"
+		"-I{root}/lib/CMSIS/CMSIS/Include"
 	],
-	"ldflags": [
-		"-T", "targets/nrf52840.ld"
-	],
+	"linkerscript": "targets/nrf52840.ld",
 	"extra-files": [
 		"lib/nrfx/mdk/system_nrf52840.c",
 		"src/device/nrf/nrf52840.s"
-	]
+	],
+	"openocd-target": "nrf51"
 }

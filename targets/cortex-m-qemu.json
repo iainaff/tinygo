@@ -1,0 +1,14 @@
+{
+	"inherits": ["cortex-m"],
+	"llvm-target": "armv7m-none-eabi",
+	"build-tags": ["qemu", "lm3s6965"],
+	"cflags": [
+		"--target=armv7m-none-eabi",
+		"-Qunused-arguments"
+	],
+	"linkerscript": "targets/lm3s6965.ld",
+	"extra-files": [
+		"targets/cortex-m-qemu.s"
+	],
+	"emulator": ["qemu-system-arm", "-machine", "lm3s6965evb", "-semihosting", "-nographic", "-kernel"]
+}

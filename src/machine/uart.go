@@ -1,4 +1,4 @@
-// +build avr nrf sam stm32
+// +build avr nrf sam sifive stm32
 
 package machine
 
@@ -6,8 +6,8 @@ import "errors"
 
 type UARTConfig struct {
 	BaudRate uint32
-	TX       uint8
-	RX       uint8
+	TX       Pin
+	RX       Pin
 }
 
 // To implement the UART interface for a board, you must declare a concrete type as follows:

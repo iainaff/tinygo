@@ -4,10 +4,28 @@ import (
 	"unsafe"
 )
 
+type valueFlags uint8
+
+// Flags list some useful flags that contain some extra information not
+// contained in an interface{} directly, like whether this value was exported at
+// all (it is possible to read unexported fields using reflection, but it is not
+// possible to modify them).
+const (
+	valueFlagIndirect valueFlags = 1 << iota
+	valueFlagExported
+)
+
 type Value struct {
 	typecode Type
 	value    unsafe.Pointer
-	indirect bool
+	flags    valueFlags
+}
+
+// isIndirect returns whether the value pointer in this Value is always a
+// pointer to the value. If it is false, it is only a pointer to the value if
+// the value is bigger than a pointer.
+func (v Value) isIndirect() bool {
+	return v.flags&valueFlagIndirect != 0
 }
 
 func Indirect(v Value) Value {
@@ -17,29 +35,32 @@ func Indirect(v Value) Value {
 	return v.Elem()
 }
 
+//go:linkname composeInterface runtime.composeInterface
+func composeInterface(Type, unsafe.Pointer) interface{}
+
+//go:linkname decomposeInterface runtime.decomposeInterface
+func decomposeInterface(i interface{}) (Type, unsafe.Pointer)
+
 func ValueOf(i interface{}) Value {
-	v := (*interfaceHeader)(unsafe.Pointer(&i))
+	typecode, value := decomposeInterface(i)
 	return Value{
-		typecode: v.typecode,
-		value:    v.value,
+		typecode: typecode,
+		value:    value,
+		flags:    valueFlagExported,
 	}
 }
 
 func (v Value) Interface() interface{} {
-	i := interfaceHeader{
-		typecode: v.typecode,
-		value:    v.value,
-	}
-	if v.indirect && v.Type().Size() <= unsafe.Sizeof(uintptr(0)) {
+	if v.isIndirect() && v.Type().Size() <= unsafe.Sizeof(uintptr(0)) {
 		// Value was indirect but must be put back directly in the interface
 		// value.
 		var value uintptr
 		for j := v.Type().Size(); j != 0; j-- {
 			value = (value << 8) | uintptr(*(*uint8)(unsafe.Pointer(uintptr(v.value) + j - 1)))
 		}
-		i.value = unsafe.Pointer(value)
+		v.value = unsafe.Pointer(value)
 	}
-	return *(*interface{})(unsafe.Pointer(&i))
+	return composeInterface(v.typecode, v.value)
 }
 
 func (v Value) Type() Type {
@@ -50,9 +71,14 @@ func (v Value) Kind() Kind {
 	return v.Type().Kind()
 }
 
+// IsNil returns whether the value is the nil value. It panics if the value Kind
+// is not a channel, map, pointer, function, slice, or interface.
 func (v Value) IsNil() bool {
 	switch v.Kind() {
 	case Chan, Map, Ptr:
+		if v.isIndirect() {
+			return *(*uintptr)(v.value) == 0
+		}
 		return v.value == nil
 	case Func:
 		if v.value == nil {
@@ -70,16 +96,21 @@ func (v Value) IsNil() bool {
 		if v.value == nil {
 			return true
 		}
-		itf := (*interfaceHeader)(v.value)
-		return itf.value == nil
+		_, val := decomposeInterface(*(*interface{})(v.value))
+		return val == nil
 	default:
 		panic(&ValueError{"IsNil"})
 	}
 }
 
+// Pointer returns the underlying pointer of the given value for the following
+// types: chan, map, pointer, unsafe.Pointer, slice, func.
 func (v Value) Pointer() uintptr {
 	switch v.Kind() {
 	case Chan, Map, Ptr, UnsafePointer:
+		if v.isIndirect() {
+			return *(*uintptr)(v.value)
+		}
 		return uintptr(v.value)
 	case Slice:
 		slice := (*SliceHeader)(v.value)
@@ -92,7 +123,7 @@ func (v Value) Pointer() uintptr {
 }
 
 func (v Value) IsValid() bool {
-	panic("unimplemented: (reflect.Value).IsValid()")
+	return v.typecode != 0
 }
 
 func (v Value) CanInterface() bool {
@@ -109,13 +140,13 @@ func (v Value) Addr() Value {
 }
 
 func (v Value) CanSet() bool {
-	return v.indirect
+	return v.flags&(valueFlagExported|valueFlagIndirect) == valueFlagExported|valueFlagIndirect
 }
 
 func (v Value) Bool() bool {
 	switch v.Kind() {
 	case Bool:
-		if v.indirect {
+		if v.isIndirect() {
 			return *((*bool)(v.value))
 		} else {
 			return uintptr(v.value) != 0
@@ -128,31 +159,31 @@ func (v Value) Bool() bool {
 func (v Value) Int() int64 {
 	switch v.Kind() {
 	case Int:
-		if v.indirect || unsafe.Sizeof(int(0)) > unsafe.Sizeof(uintptr(0)) {
+		if v.isIndirect() || unsafe.Sizeof(int(0)) > unsafe.Sizeof(uintptr(0)) {
 			return int64(*(*int)(v.value))
 		} else {
 			return int64(int(uintptr(v.value)))
 		}
 	case Int8:
-		if v.indirect {
+		if v.isIndirect() {
 			return int64(*(*int8)(v.value))
 		} else {
 			return int64(int8(uintptr(v.value)))
 		}
 	case Int16:
-		if v.indirect {
+		if v.isIndirect() {
 			return int64(*(*int16)(v.value))
 		} else {
 			return int64(int16(uintptr(v.value)))
 		}
 	case Int32:
-		if v.indirect || unsafe.Sizeof(int32(0)) > unsafe.Sizeof(uintptr(0)) {
+		if v.isIndirect() || unsafe.Sizeof(int32(0)) > unsafe.Sizeof(uintptr(0)) {
 			return int64(*(*int32)(v.value))
 		} else {
 			return int64(int32(uintptr(v.value)))
 		}
 	case Int64:
-		if v.indirect || unsafe.Sizeof(int64(0)) > unsafe.Sizeof(uintptr(0)) {
+		if v.isIndirect() || unsafe.Sizeof(int64(0)) > unsafe.Sizeof(uintptr(0)) {
 			return int64(*(*int64)(v.value))
 		} else {
 			return int64(int64(uintptr(v.value)))
@@ -165,37 +196,37 @@ func (v Value) Int() int64 {
 func (v Value) Uint() uint64 {
 	switch v.Kind() {
 	case Uintptr:
-		if v.indirect {
+		if v.isIndirect() {
 			return uint64(*(*uintptr)(v.value))
 		} else {
 			return uint64(uintptr(v.value))
 		}
 	case Uint8:
-		if v.indirect {
+		if v.isIndirect() {
 			return uint64(*(*uint8)(v.value))
 		} else {
 			return uint64(uintptr(v.value))
 		}
 	case Uint16:
-		if v.indirect {
+		if v.isIndirect() {
 			return uint64(*(*uint16)(v.value))
 		} else {
 			return uint64(uintptr(v.value))
 		}
 	case Uint:
-		if v.indirect || unsafe.Sizeof(uint(0)) > unsafe.Sizeof(uintptr(0)) {
+		if v.isIndirect() || unsafe.Sizeof(uint(0)) > unsafe.Sizeof(uintptr(0)) {
 			return uint64(*(*uint)(v.value))
 		} else {
 			return uint64(uintptr(v.value))
 		}
 	case Uint32:
-		if v.indirect || unsafe.Sizeof(uint32(0)) > unsafe.Sizeof(uintptr(0)) {
+		if v.isIndirect() || unsafe.Sizeof(uint32(0)) > unsafe.Sizeof(uintptr(0)) {
 			return uint64(*(*uint32)(v.value))
 		} else {
 			return uint64(uintptr(v.value))
 		}
 	case Uint64:
-		if v.indirect || unsafe.Sizeof(uint64(0)) > unsafe.Sizeof(uintptr(0)) {
+		if v.isIndirect() || unsafe.Sizeof(uint64(0)) > unsafe.Sizeof(uintptr(0)) {
 			return uint64(*(*uint64)(v.value))
 		} else {
 			return uint64(uintptr(v.value))
@@ -208,7 +239,7 @@ func (v Value) Uint() uint64 {
 func (v Value) Float() float64 {
 	switch v.Kind() {
 	case Float32:
-		if v.indirect || unsafe.Sizeof(float32(0)) > unsafe.Sizeof(uintptr(0)) {
+		if v.isIndirect() || unsafe.Sizeof(float32(0)) > unsafe.Sizeof(uintptr(0)) {
 			// The float is stored as an external value on systems with 16-bit
 			// pointers.
 			return float64(*(*float32)(v.value))
@@ -218,7 +249,7 @@ func (v Value) Float() float64 {
 			return float64(*(*float32)(unsafe.Pointer(&v.value)))
 		}
 	case Float64:
-		if v.indirect || unsafe.Sizeof(float64(0)) > unsafe.Sizeof(uintptr(0)) {
+		if v.isIndirect() || unsafe.Sizeof(float64(0)) > unsafe.Sizeof(uintptr(0)) {
 			// For systems with 16-bit and 32-bit pointers.
 			return *(*float64)(v.value)
 		} else {
@@ -234,7 +265,7 @@ func (v Value) Float() float64 {
 func (v Value) Complex() complex128 {
 	switch v.Kind() {
 	case Complex64:
-		if v.indirect || unsafe.Sizeof(complex64(0)) > unsafe.Sizeof(uintptr(0)) {
+		if v.isIndirect() || unsafe.Sizeof(complex64(0)) > unsafe.Sizeof(uintptr(0)) {
 			// The complex number is stored as an external value on systems with
 			// 16-bit and 32-bit pointers.
 			return complex128(*(*complex64)(v.value))
@@ -273,6 +304,8 @@ func (v Value) Slice(i, j int) Value {
 	panic("unimplemented: (reflect.Value).Slice()")
 }
 
+// Len returns the length of this value for slices, strings, arrays, channels,
+// and maps. For oter types, it panics.
 func (v Value) Len() int {
 	t := v.Type()
 	switch t.Kind() {
@@ -280,7 +313,9 @@ func (v Value) Len() int {
 		return int((*SliceHeader)(v.value).Len)
 	case String:
 		return int((*StringHeader)(v.value).Len)
-	default: // Array, Chan, Map
+	case Array:
+		return v.Type().Len()
+	default: // Chan, Map
 		panic("unimplemented: (reflect.Value).Len()")
 	}
 }
@@ -295,15 +330,17 @@ func (v Value) Cap() int {
 	}
 }
 
+// NumField returns the number of fields of this struct. It panics for other
+// value types.
 func (v Value) NumField() int {
-	panic("unimplemented: (reflect.Value).NumField()")
+	return v.Type().NumField()
 }
 
 func (v Value) Elem() Value {
 	switch v.Kind() {
 	case Ptr:
 		ptr := v.value
-		if v.indirect {
+		if v.isIndirect() {
 			ptr = *(*unsafe.Pointer)(ptr)
 		}
 		if ptr == nil {
@@ -312,15 +349,71 @@ func (v Value) Elem() Value {
 		return Value{
 			typecode: v.Type().Elem(),
 			value:    ptr,
-			indirect: true,
+			flags:    v.flags | valueFlagIndirect,
 		}
 	default: // not implemented: Interface
 		panic(&ValueError{"Elem"})
 	}
 }
 
+// Field returns the value of the i'th field of this struct.
 func (v Value) Field(i int) Value {
-	panic("unimplemented: (reflect.Value).Field()")
+	structField := v.Type().Field(i)
+	flags := v.flags
+	if structField.PkgPath != "" {
+		// The fact that PkgPath is present means that this field is not
+		// exported.
+		flags &^= valueFlagExported
+	}
+
+	size := v.Type().Size()
+	fieldSize := structField.Type.Size()
+	if v.isIndirect() || fieldSize > unsafe.Sizeof(uintptr(0)) {
+		// v.value was already a pointer to the value and it should stay that
+		// way.
+		return Value{
+			flags:    flags,
+			typecode: structField.Type,
+			value:    unsafe.Pointer(uintptr(v.value) + structField.Offset),
+		}
+	}
+
+	// The fieldSize is smaller than uintptr, which means that the value will
+	// have to be stored directly in the interface value.
+
+	if fieldSize == 0 {
+		// The struct field is zero sized.
+		// This is a rare situation, but because it's undefined behavior
+		// to shift the size of the value (zeroing the value), handle this
+		// situation explicitly.
+		return Value{
+			flags:    flags,
+			typecode: structField.Type,
+			value:    unsafe.Pointer(uintptr(0)),
+		}
+	}
+
+	if size > unsafe.Sizeof(uintptr(0)) {
+		// The value was not stored in the interface before but will be
+		// afterwards, so load the value (from the correct offset) and return
+		// it.
+		ptr := unsafe.Pointer(uintptr(v.value) + structField.Offset)
+		value := unsafe.Pointer(loadValue(ptr, fieldSize))
+		return Value{
+			flags:    0,
+			typecode: structField.Type,
+			value:    value,
+		}
+	}
+
+	// The value was already stored directly in the interface and it still
+	// is. Cut out the part of the value that we need.
+	value := maskAndShift(uintptr(v.value), structField.Offset, fieldSize)
+	return Value{
+		flags:    flags,
+		typecode: structField.Type,
+		value:    unsafe.Pointer(value),
+	}
 }
 
 func (v Value) Index(i int) Value {
@@ -333,9 +426,9 @@ func (v Value) Index(i int) Value {
 		}
 		elem := Value{
 			typecode: v.Type().Elem(),
-			indirect: true,
+			flags:    v.flags | valueFlagIndirect,
 		}
-		addr := uintptr(slice.Data) + elem.Type().Size() * uintptr(i) // pointer to new value
+		addr := uintptr(slice.Data) + elem.Type().Size()*uintptr(i) // pointer to new value
 		elem.value = unsafe.Pointer(addr)
 		return elem
 	case String:
@@ -348,13 +441,76 @@ func (v Value) Index(i int) Value {
 		}
 		return Value{
 			typecode: Uint8.basicType(),
-			value: unsafe.Pointer(uintptr(*(*uint8)(unsafe.Pointer(s.Data + uintptr(i))))),
+			value:    unsafe.Pointer(uintptr(*(*uint8)(unsafe.Pointer(s.Data + uintptr(i))))),
 		}
 	case Array:
-		panic("unimplemented: (reflect.Value).Index()")
+		// Extract an element from the array.
+		elemType := v.Type().Elem()
+		elemSize := elemType.Size()
+		size := v.Type().Size()
+		if size == 0 {
+			// The element size is 0 and/or the length of the array is 0.
+			return Value{
+				typecode: v.Type().Elem(),
+				flags:    v.flags,
+			}
+		}
+		if elemSize > unsafe.Sizeof(uintptr(0)) {
+			// The resulting value doesn't fit in a pointer so must be
+			// indirect. Also, because size != 0 this implies that the array
+			// length must be != 0, and thus that the total size is at least
+			// elemSize.
+			addr := uintptr(v.value) + elemSize*uintptr(i) // pointer to new value
+			return Value{
+				typecode: v.Type().Elem(),
+				flags:    v.flags,
+				value:    unsafe.Pointer(addr),
+			}
+		}
+
+		if size > unsafe.Sizeof(uintptr(0)) {
+			// The element fits in a pointer, but the array does not.
+			// Load the value from the pointer.
+			addr := uintptr(v.value) + elemSize*uintptr(i) // pointer to new value
+			return Value{
+				typecode: v.Type().Elem(),
+				flags:    v.flags,
+				value:    unsafe.Pointer(loadValue(unsafe.Pointer(addr), elemSize)),
+			}
+		}
+
+		// The value fits in a pointer, so extract it with some shifting and
+		// masking.
+		offset := elemSize * uintptr(i)
+		value := maskAndShift(uintptr(v.value), offset, elemSize)
+		return Value{
+			typecode: v.Type().Elem(),
+			flags:    v.flags,
+			value:    unsafe.Pointer(value),
+		}
 	default:
 		panic(&ValueError{"Index"})
 	}
+}
+
+// loadValue loads a value that may or may not be word-aligned. The number of
+// bytes given in size are loaded. The biggest possible size it can load is that
+// of an uintptr.
+func loadValue(ptr unsafe.Pointer, size uintptr) uintptr {
+	loadedValue := uintptr(0)
+	shift := uintptr(0)
+	for i := uintptr(0); i < size; i++ {
+		loadedValue |= uintptr(*(*byte)(ptr)) << shift
+		shift += 8
+		ptr = unsafe.Pointer(uintptr(ptr) + 1)
+	}
+	return loadedValue
+}
+
+// maskAndShift cuts out a part of a uintptr. Note that the offset may not be 0.
+func maskAndShift(value, offset, size uintptr) uintptr {
+	mask := ^uintptr(0) >> ((unsafe.Sizeof(uintptr(0)) - size) * 8)
+	return (uintptr(value) >> (offset * 8)) & mask
 }
 
 func (v Value) MapKeys() []Value {
@@ -365,20 +521,33 @@ func (v Value) MapIndex(key Value) Value {
 	panic("unimplemented: (reflect.Value).MapIndex()")
 }
 
+func (v Value) MapRange() *MapIter {
+	panic("unimplemented: (reflect.Value).MapRange()")
+}
+
+type MapIter struct {
+}
+
+func (it *MapIter) Key() Value {
+	panic("unimplemented: (*reflect.MapIter).Key()")
+}
+
+func (it *MapIter) Value() Value {
+	panic("unimplemented: (*reflect.MapIter).Value()")
+}
+
+func (it *MapIter) Next() bool {
+	panic("unimplemented: (*reflect.MapIter).Next()")
+}
+
 func (v Value) Set(x Value) {
-	if !v.indirect {
-		panic("reflect: value is not addressable")
-	}
-	if v.Type() != x.Type() {
-		if v.Kind() == Interface {
-			panic("reflect: unimplemented: assigning to interface of different type")
-		} else {
-			panic("reflect: cannot assign")
-		}
+	v.checkAddressable()
+	if !v.Type().AssignableTo(x.Type()) {
+		panic("reflect: cannot set")
 	}
 	size := v.Type().Size()
 	xptr := x.value
-	if size <= unsafe.Sizeof(uintptr(0)) && !x.indirect {
+	if size <= unsafe.Sizeof(uintptr(0)) && !x.isIndirect() {
 		value := x.value
 		xptr = unsafe.Pointer(&value)
 	}
@@ -386,9 +555,7 @@ func (v Value) Set(x Value) {
 }
 
 func (v Value) SetBool(x bool) {
-	if !v.indirect {
-		panic("reflect: value is not addressable")
-	}
+	v.checkAddressable()
 	switch v.Kind() {
 	case Bool:
 		*(*bool)(v.value) = x
@@ -398,9 +565,7 @@ func (v Value) SetBool(x bool) {
 }
 
 func (v Value) SetInt(x int64) {
-	if !v.indirect {
-		panic("reflect: value is not addressable")
-	}
+	v.checkAddressable()
 	switch v.Kind() {
 	case Int:
 		*(*int)(v.value) = int(x)
@@ -418,9 +583,7 @@ func (v Value) SetInt(x int64) {
 }
 
 func (v Value) SetUint(x uint64) {
-	if !v.indirect {
-		panic("reflect: value is not addressable")
-	}
+	v.checkAddressable()
 	switch v.Kind() {
 	case Uint:
 		*(*uint)(v.value) = uint(x)
@@ -440,9 +603,7 @@ func (v Value) SetUint(x uint64) {
 }
 
 func (v Value) SetFloat(x float64) {
-	if !v.indirect {
-		panic("reflect: value is not addressable")
-	}
+	v.checkAddressable()
 	switch v.Kind() {
 	case Float32:
 		*(*float32)(v.value) = float32(x)
@@ -454,9 +615,7 @@ func (v Value) SetFloat(x float64) {
 }
 
 func (v Value) SetComplex(x complex128) {
-	if !v.indirect {
-		panic("reflect: value is not addressable")
-	}
+	v.checkAddressable()
 	switch v.Kind() {
 	case Complex64:
 		*(*complex64)(v.value) = complex64(x)
@@ -468,9 +627,7 @@ func (v Value) SetComplex(x complex128) {
 }
 
 func (v Value) SetString(x string) {
-	if !v.indirect {
-		panic("reflect: value is not addressable")
-	}
+	v.checkAddressable()
 	switch v.Kind() {
 	case String:
 		*(*string)(v.value) = x
@@ -479,19 +636,27 @@ func (v Value) SetString(x string) {
 	}
 }
 
+func (v Value) checkAddressable() {
+	if !v.isIndirect() {
+		panic("reflect: value is not addressable")
+	}
+}
+
 func MakeSlice(typ Type, len, cap int) Value {
 	panic("unimplemented: reflect.MakeSlice()")
+}
+
+func Zero(typ Type) Value {
+	panic("unimplemented: reflect.Zero()")
+}
+
+func New(typ Type) Value {
+	panic("unimplemented: reflect.New()")
 }
 
 type funcHeader struct {
 	Context unsafe.Pointer
 	Code    unsafe.Pointer
-}
-
-// This is the same thing as an interface{}.
-type interfaceHeader struct {
-	typecode Type
-	value    unsafe.Pointer
 }
 
 type SliceHeader struct {

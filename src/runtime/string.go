@@ -89,6 +89,45 @@ func stringToBytes(x _string) (slice struct {
 	return
 }
 
+// Convert a []rune slice to a string.
+func stringFromRunes(runeSlice []rune) (s _string) {
+	// Count the number of characters that will be in the string.
+	for _, r := range runeSlice {
+		_, numBytes := encodeUTF8(r)
+		s.length += numBytes
+	}
+
+	// Allocate memory for the string.
+	s.ptr = (*byte)(alloc(s.length))
+
+	// Encode runes to UTF-8 and store the resulting bytes in the string.
+	index := uintptr(0)
+	for _, r := range runeSlice {
+		array, numBytes := encodeUTF8(r)
+		for _, c := range array[:numBytes] {
+			*(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(s.ptr)) + index)) = c
+			index++
+		}
+	}
+
+	return
+}
+
+// Convert a string to []rune slice.
+func stringToRunes(s string) []rune {
+	var n = 0
+	for range s {
+		n++
+	}
+	var r = make([]rune, n)
+	n = 0
+	for _, e := range s {
+		r[n] = e
+		n++
+	}
+	return r
+}
+
 // Create a string from a Unicode code point.
 func stringFromUnicode(x rune) _string {
 	array, length := encodeUTF8(x)
@@ -166,9 +205,10 @@ func decodeUTF8(s string, index uintptr) (rune, uintptr) {
 	}
 }
 
-// indexByte returns the index of the first instance of c in s, or -1 if c is not present in s.
-//go:linkname indexByte strings.IndexByte
-func indexByte(s string, c byte) int {
+// indexByteString returns the index of the first instance of c in s, or -1 if c
+// is not present in s.
+//go:linkname indexByteString internal/bytealg.IndexByteString
+func indexByteString(s string, c byte) int {
 	for i := 0; i < len(s); i++ {
 		if s[i] == c {
 			return i

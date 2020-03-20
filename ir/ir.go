@@ -2,7 +2,6 @@ package ir
 
 import (
 	"go/ast"
-	"go/token"
 	"go/types"
 	"sort"
 	"strings"
@@ -23,44 +22,18 @@ type Program struct {
 	mainPkg       *ssa.Package
 	Functions     []*Function
 	functionMap   map[*ssa.Function]*Function
-	Globals       []*Global
-	globalMap     map[*ssa.Global]*Global
-	comments      map[string]*ast.CommentGroup
-	NamedTypes    []*NamedType
 }
 
 // Function or method.
 type Function struct {
 	*ssa.Function
-	LLVMFn    llvm.Value
-	linkName  string // go:linkname, go:export, go:interrupt
-	exported  bool   // go:export
-	nobounds  bool   // go:nobounds
-	flag      bool   // used by dead code elimination
-	interrupt bool   // go:interrupt
-}
-
-// Global variable, possibly constant.
-type Global struct {
-	*ssa.Global
-	program     *Program
-	LLVMGlobal  llvm.Value
-	linkName    string // go:extern
-	extern      bool   // go:extern
-	initializer Value
-}
-
-// Type with a name and possibly methods.
-type NamedType struct {
-	*ssa.Type
-	LLVMType llvm.Type
-}
-
-// Type that is at some point put in an interface.
-type TypeWithMethods struct {
-	t       types.Type
-	Num     int
-	Methods map[string]*types.Selection
+	LLVMFn   llvm.Value
+	module   string     // go:wasm-module
+	linkName string     // go:linkname, go:export
+	exported bool       // go:export
+	nobounds bool       // go:nobounds
+	flag     bool       // used by dead code elimination
+	inline   InlineType // go:inline
 }
 
 // Interface type that is at some point used in a type assert (to check whether
@@ -70,37 +43,27 @@ type Interface struct {
 	Type *types.Interface
 }
 
-// Create and intialize a new *Program from a *ssa.Program.
-func NewProgram(lprogram *loader.Program, mainPath string) *Program {
-	comments := map[string]*ast.CommentGroup{}
-	for _, pkgInfo := range lprogram.Sorted() {
-		for _, file := range pkgInfo.Files {
-			for _, decl := range file.Decls {
-				switch decl := decl.(type) {
-				case *ast.GenDecl:
-					switch decl.Tok {
-					case token.TYPE, token.VAR:
-						if len(decl.Specs) != 1 {
-							continue
-						}
-						for _, spec := range decl.Specs {
-							switch spec := spec.(type) {
-							case *ast.TypeSpec: // decl.Tok == token.TYPE
-								id := pkgInfo.Pkg.Path() + "." + spec.Name.Name
-								comments[id] = decl.Doc
-							case *ast.ValueSpec: // decl.Tok == token.VAR
-								for _, name := range spec.Names {
-									id := pkgInfo.Pkg.Path() + "." + name.Name
-									comments[id] = decl.Doc
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
+type InlineType int
 
+// How much to inline.
+const (
+	// Default behavior. The compiler decides for itself whether any given
+	// function will be inlined. Whether any function is inlined depends on the
+	// optimization level.
+	InlineDefault InlineType = iota
+
+	// Inline hint, just like the C inline keyword (signalled using
+	// //go:inline). The compiler will be more likely to inline this function,
+	// but it is not a guarantee.
+	InlineHint
+
+	// Don't inline, just like the GCC noinline attribute. Signalled using
+	// //go:noinline.
+	InlineNone
+)
+
+// Create and initialize a new *Program from a *ssa.Program.
+func NewProgram(lprogram *loader.Program, mainPath string) *Program {
 	program := lprogram.LoadSSA()
 	program.Build()
 
@@ -172,8 +135,6 @@ func NewProgram(lprogram *loader.Program, mainPath string) *Program {
 		LoaderProgram: lprogram,
 		mainPkg:       mainPkg,
 		functionMap:   make(map[*ssa.Function]*Function),
-		globalMap:     make(map[*ssa.Global]*Global),
-		comments:      comments,
 	}
 
 	for _, pkg := range packageList {
@@ -188,9 +149,6 @@ func NewProgram(lprogram *loader.Program, mainPath string) *Program {
 func (p *Program) AddPackage(pkg *ssa.Package) {
 	memberNames := make([]string, 0)
 	for name := range pkg.Members {
-		if isCGoInternal(name) {
-			continue
-		}
 		memberNames = append(memberNames, name)
 	}
 	sort.Strings(memberNames)
@@ -199,13 +157,8 @@ func (p *Program) AddPackage(pkg *ssa.Package) {
 		member := pkg.Members[name]
 		switch member := member.(type) {
 		case *ssa.Function:
-			if isCGoInternal(member.Name()) {
-				continue
-			}
 			p.addFunction(member)
 		case *ssa.Type:
-			t := &NamedType{Type: member}
-			p.NamedTypes = append(p.NamedTypes, t)
 			methods := getAllMethods(pkg.Prog, member.Type())
 			if !types.IsInterface(member.Type()) {
 				// named type
@@ -214,13 +167,7 @@ func (p *Program) AddPackage(pkg *ssa.Package) {
 				}
 			}
 		case *ssa.Global:
-			g := &Global{program: p, Global: member}
-			doc := p.comments[g.RelString(nil)]
-			if doc != nil {
-				g.parsePragmas(doc)
-			}
-			p.Globals = append(p.Globals, g)
-			p.globalMap[member] = g
+			// Ignore. Globals are not handled here.
 		case *ssa.NamedConst:
 			// Ignore: these are already resolved.
 		default:
@@ -230,6 +177,9 @@ func (p *Program) AddPackage(pkg *ssa.Package) {
 }
 
 func (p *Program) addFunction(ssaFn *ssa.Function) {
+	if _, ok := p.functionMap[ssaFn]; ok {
+		return
+	}
 	f := &Function{Function: ssaFn}
 	f.parsePragmas()
 	p.Functions = append(p.Functions, f)
@@ -252,10 +202,6 @@ func hasUnsafeImport(pkg *types.Package) bool {
 
 func (p *Program) GetFunction(ssaFn *ssa.Function) *Function {
 	return p.functionMap[ssaFn]
-}
-
-func (p *Program) GetGlobal(ssaGlobal *ssa.Global) *Global {
-	return p.globalMap[ssaGlobal]
 }
 
 func (p *Program) MainPkg() *ssa.Package {
@@ -286,18 +232,16 @@ func (f *Function) parsePragmas() {
 				}
 				f.linkName = parts[1]
 				f.exported = true
-			case "//go:interrupt":
+			case "//go:wasm-module":
+				// Alternative comment for setting the import module.
 				if len(parts) != 2 {
 					continue
 				}
-				name := parts[1]
-				if strings.HasSuffix(name, "_vect") {
-					// AVR vector naming
-					name = "__vector_" + name[:len(name)-5]
-				}
-				f.linkName = name
-				f.exported = true
-				f.interrupt = true
+				f.module = parts[1]
+			case "//go:inline":
+				f.inline = InlineHint
+			case "//go:noinline":
+				f.inline = InlineNone
 			case "//go:linkname":
 				if len(parts) != 3 || parts[1] != f.Name() {
 					continue
@@ -331,12 +275,14 @@ func (f *Function) IsExported() bool {
 	return f.exported || f.CName() != ""
 }
 
-// Return true for functions annotated with //go:interrupt. The function name is
-// already customized in LinkName() to hook up in the interrupt vector.
-//
-// On some platforms (like AVR), interrupts need a special compiler flag.
-func (f *Function) IsInterrupt() bool {
-	return f.interrupt
+// Return the inline directive of this function.
+func (f *Function) Inline() InlineType {
+	return f.inline
+}
+
+// Return the module name if not the default.
+func (f *Function) Module() string {
+	return f.module
 }
 
 // Return the link name for this function.
@@ -371,88 +317,6 @@ func (f *Function) CName() string {
 		return name[2:]
 	}
 	return ""
-}
-
-// Parse //go: pragma comments from the source.
-func (g *Global) parsePragmas(doc *ast.CommentGroup) {
-	for _, comment := range doc.List {
-		if !strings.HasPrefix(comment.Text, "//go:") {
-			continue
-		}
-		parts := strings.Fields(comment.Text)
-		switch parts[0] {
-		case "//go:extern":
-			g.extern = true
-			if len(parts) == 2 {
-				g.linkName = parts[1]
-			}
-		}
-	}
-}
-
-// Return the link name for this global.
-func (g *Global) LinkName() string {
-	if g.linkName != "" {
-		return g.linkName
-	}
-	if name := g.CName(); name != "" {
-		return name
-	}
-	return g.RelString(nil)
-}
-
-func (g *Global) IsExtern() bool {
-	return g.extern || g.CName() != ""
-}
-
-// Return the name of the C global if this is a CGo wrapper. Otherwise, return a
-// zero-length string.
-func (g *Global) CName() string {
-	name := g.Name()
-	if strings.HasPrefix(name, "C.") {
-		// created by ../loader/cgo.go
-		return name[2:]
-	}
-	return ""
-}
-
-func (g *Global) Initializer() Value {
-	return g.initializer
-}
-
-// Return true if this named type is annotated with the //go:volatile pragma,
-// for volatile loads and stores.
-func (p *Program) IsVolatile(t types.Type) bool {
-	if t, ok := t.(*types.Named); !ok {
-		return false
-	} else {
-		if t.Obj().Pkg() == nil {
-			return false
-		}
-		id := t.Obj().Pkg().Path() + "." + t.Obj().Name()
-		doc := p.comments[id]
-		if doc == nil {
-			return false
-		}
-		for _, line := range doc.List {
-			if strings.TrimSpace(line.Text) == "//go:volatile" {
-				return true
-			}
-		}
-		return false
-	}
-}
-
-// Return true if this is a CGo-internal function that can be ignored.
-func isCGoInternal(name string) bool {
-	if strings.HasPrefix(name, "_Cgo_") || strings.HasPrefix(name, "_cgo") {
-		// _Cgo_ptr, _Cgo_use, _cgoCheckResult, _cgo_runtime_cgocall
-		return true // CGo-internal functions
-	}
-	if strings.HasPrefix(name, "__cgofn__cgo_") {
-		return true // CGo function pointer in global scope
-	}
-	return false
 }
 
 // Get all methods of a type.

@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"fmt"
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
 )
@@ -20,6 +21,9 @@ func (c *Compiler) createRuntimeCall(fnName string, args []llvm.Value, name stri
 		panic("trying to call runtime." + fnName)
 	}
 	fn := c.ir.GetFunction(member.(*ssa.Function))
+	if fn.LLVMFn.IsNil() {
+		panic(fmt.Errorf("function %s does not appear in LLVM IR", fnName))
+	}
 	if !fn.IsExported() {
 		args = append(args, llvm.Undef(c.i8ptrType))            // unused context parameter
 		args = append(args, llvm.ConstPointerNull(c.i8ptrType)) // coroutine handle
@@ -38,7 +42,7 @@ func (c *Compiler) createCall(fn llvm.Value, args []llvm.Value, name string) llv
 }
 
 // Expand an argument type to a list that can be used in a function call
-// paramter list.
+// parameter list.
 func (c *Compiler) expandFormalParamType(t llvm.Type) []llvm.Type {
 	switch t.TypeKind() {
 	case llvm.StructTypeKind:
@@ -52,6 +56,25 @@ func (c *Compiler) expandFormalParamType(t llvm.Type) []llvm.Type {
 	default:
 		// TODO: split small arrays
 		return []llvm.Type{t}
+	}
+}
+
+// Expand an argument type to a list of offsets from the start of the object.
+// Used together with expandFormalParam to get the offset of each value from the
+// start of the non-expanded value.
+func (c *Compiler) expandFormalParamOffsets(t llvm.Type) []uint64 {
+	switch t.TypeKind() {
+	case llvm.StructTypeKind:
+		fields := c.flattenAggregateTypeOffsets(t)
+		if len(fields) <= MaxFieldsPerParam {
+			return fields
+		} else {
+			// failed to lower
+			return []uint64{0}
+		}
+	default:
+		// TODO: split small arrays
+		return []uint64{0}
 	}
 }
 
@@ -92,6 +115,27 @@ func (c *Compiler) flattenAggregateType(t llvm.Type) []llvm.Type {
 	}
 }
 
+// Return the offsets from the start of the object if this object type were
+// flattened like in flattenAggregate. Used together with flattenAggregate to
+// know the start indices of each value in the non-flattened object.
+func (c *Compiler) flattenAggregateTypeOffsets(t llvm.Type) []uint64 {
+	switch t.TypeKind() {
+	case llvm.StructTypeKind:
+		fields := make([]uint64, 0, t.StructElementTypesCount())
+		for fieldIndex, field := range t.StructElementTypes() {
+			suboffsets := c.flattenAggregateTypeOffsets(field)
+			offset := c.targetData.ElementOffset(t, fieldIndex)
+			for i := range suboffsets {
+				suboffsets[i] += offset
+			}
+			fields = append(fields, suboffsets...)
+		}
+		return fields
+	default:
+		return []uint64{0}
+	}
+}
+
 // Break down a struct into its elementary types for argument passing. The value
 // equivalent of flattenAggregateType
 func (c *Compiler) flattenAggregate(v llvm.Value) []llvm.Value {
@@ -123,10 +167,7 @@ func (c *Compiler) collapseFormalParamInternal(t llvm.Type, fields []llvm.Value)
 	switch t.TypeKind() {
 	case llvm.StructTypeKind:
 		if len(c.flattenAggregateType(t)) <= MaxFieldsPerParam {
-			value, err := c.getZeroValue(t)
-			if err != nil {
-				panic("could not get zero value of struct: " + err.Error())
-			}
+			value := llvm.ConstNull(t)
 			for i, subtyp := range t.StructElementTypes() {
 				structField, remaining := c.collapseFormalParamInternal(subtyp, fields)
 				fields = remaining

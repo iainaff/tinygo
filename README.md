@@ -1,8 +1,8 @@
 # TinyGo - Go compiler for small places
 
-[![Build Status](https://travis-ci.com/tinygo-org/tinygo.svg?branch=dev)](https://travis-ci.com/tinygo-org/tinygo)
+[![CircleCI](https://circleci.com/gh/tinygo-org/tinygo/tree/dev.svg?style=svg)](https://circleci.com/gh/tinygo-org/tinygo/tree/dev) [![Build Status](https://dev.azure.com/tinygo/tinygo/_apis/build/status/tinygo-CI?branchName=dev)](https://dev.azure.com/tinygo/tinygo/_build/latest?definitionId=1&branchName=dev)
 
-TinyGo is a Go compiler intended for use in small places such as microcontrollers, WebAssembly (WASM), and command-line tools.
+TinyGo is a Go compiler intended for use in small places such as microcontrollers, WebAssembly (Wasm), and command-line tools.
 
 It reuses libraries used by the [Go language tools](https://golang.org/pkg/go/) alongside [LLVM](http://llvm.org) to provide an alternative way to compile programs written in the Go programming language.
 
@@ -17,8 +17,8 @@ import (
 )
 
 func main() {
-    led := machine.GPIO{machine.LED}
-    led.Configure(machine.GPIOConfig{Mode: machine.GPIO_OUTPUT})
+    led := machine.LED
+    led.Configure(machine.PinConfig{Mode: machine.PinOutput})
     for {
         led.Low()
         time.Sleep(time.Millisecond * 1000)
@@ -43,18 +43,35 @@ See the [getting started instructions](https://tinygo.org/getting-started/) for 
 
 You can compile TinyGo programs for microcontrollers, WebAssembly and Linux.
 
-The following microcontroller boards are currently supported:
+The following 27 microcontroller boards are currently supported:
 
+* [Adafruit Circuit Playground Bluefruit](https://www.adafruit.com/product/4333)
+* [Adafruit Circuit Playground Express](https://www.adafruit.com/product/3333)
+* [Adafruit Feather M0](https://www.adafruit.com/product/2772)
+* [Adafruit Feather M4](https://www.adafruit.com/product/3857)
 * [Adafruit ItsyBitsy M0](https://www.adafruit.com/product/3727)
+* [Adafruit ItsyBitsy M4](https://www.adafruit.com/product/3800)
+* [Adafruit Metro M4 Express Airlift](https://www.adafruit.com/product/4000)
+* [Adafruit PyBadge](https://www.adafruit.com/product/4200)
+* [Adafruit PyPortal](https://www.adafruit.com/product/4116)
+* [Adafruit Trinket M0](https://www.adafruit.com/product/3500)
+* [Arduino Nano](https://store.arduino.cc/arduino-nano)
+* [Arduino Nano33 IoT](https://store.arduino.cc/nano-33-iot)
 * [Arduino Uno](https://store.arduino.cc/arduino-uno-rev3)
-* [BBC:Microbit](https://microbit.org/)
-* [ST Micro STM32F103XX "Bluepill"](http://wiki.stm32duino.com/index.php?title=Blue_Pill)
+* [BBC micro:bit](https://microbit.org/)
 * [Digispark](http://digistump.com/products/1)
+* [Game Boy Advance](https://en.wikipedia.org/wiki/Game_Boy_Advance)
+* [Makerdiary nRF52840-MDK](https://wiki.makerdiary.com/nrf52840-mdk/)
 * [Nordic Semiconductor PCA10031](https://www.nordicsemi.com/eng/Products/nRF51-Dongle)
 * [Nordic Semiconductor PCA10040](https://www.nordicsemi.com/eng/Products/Bluetooth-low-energy/nRF52-DK)
 * [Nordic Semiconductor PCA10056](https://www.nordicsemi.com/Software-and-Tools/Development-Kits/nRF52840-DK)
-* [Makerdiary nRF52840-MDK](https://wiki.makerdiary.com/nrf52840-mdk/)
 * [Phytec reel board](https://www.phytec.eu/product-eu/internet-of-things/reelboard/)
+* [PineTime DevKit](https://www.pine64.org/pinetime/)
+* [SiFIve HiFive1](https://www.sifive.com/boards/hifive1)
+* [ST Micro "Nucleo F103RB"](https://www.st.com/en/evaluation-tools/nucleo-f103rb.html)
+* [ST Micro STM32F103XX "Bluepill"](http://wiki.stm32duino.com/index.php?title=Blue_Pill)
+* [ST Micro STM32F407 "Discovery"](https://www.st.com/en/evaluation-tools/stm32f4discovery.html)
+* [X9 Pro smartwatch](https://github.com/curtpw/nRF5x-device-reverse-engineering/tree/master/X9-nrf52832-activity-tracker/)
 
 For more information, see [this list of boards](https://tinygo.org/microcontrollers/). Pull requests for additional support are welcome!
 
@@ -113,3 +130,5 @@ The original reasoning was: if [Python](https://micropython.org/) can run on mic
 ## License
 
 This project is licensed under the BSD 3-clause license, just like the [Go project](https://golang.org/LICENSE) itself.
+
+Some code has been copied from the LLVM project and is therefore licensed under [a variant of the Apache 2.0 license](http://releases.llvm.org/9.0.0/LICENSE.TXT). This has been clearly indicated in the header of these files.

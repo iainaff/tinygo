@@ -1,4 +1,4 @@
-// +build linux
+// +build darwin linux,!baremetal freebsd,!baremetal
 
 package runtime
 
@@ -18,8 +18,11 @@ func malloc(size uintptr) unsafe.Pointer
 //go:export abort
 func abort()
 
+//go:export exit
+func exit(code int)
+
 //go:export clock_gettime
-func clock_gettime(clk_id uint, ts *timespec)
+func clock_gettime(clk_id int32, ts *timespec)
 
 const heapSize = 1 * 1024 * 1024 // 1MB to start
 
@@ -32,10 +35,12 @@ type timeUnit int64
 
 const tickMicros = 1
 
-// TODO: Linux/amd64-specific
+// Note: tv_sec and tv_nsec vary in size by platform. They are 32-bit on 32-bit
+// systems and 64-bit on 64-bit systems (at least on macOS/Linux), so we can
+// simply use the 'int' type which does the same.
 type timespec struct {
-	tv_sec  int64
-	tv_nsec int64
+	tv_sec  int // time_t: follows the platform bitness
+	tv_nsec int // long: on Linux and macOS, follows the platform bitness
 }
 
 const CLOCK_MONOTONIC_RAW = 4
@@ -74,4 +79,9 @@ func monotime() uint64 {
 
 func ticks() timeUnit {
 	return timeUnit(monotime())
+}
+
+//go:linkname syscall_Exit syscall.Exit
+func syscall_Exit(code int) {
+	exit(code)
 }

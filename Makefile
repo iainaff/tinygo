@@ -1,150 +1,305 @@
 
 # aliases
 all: tinygo
-tinygo: build/tinygo
 
-.PHONY: all tinygo static run-test run-blinky run-blinky2 clean fmt gen-device gen-device-nrf gen-device-avr
+# Default build and source directories, as created by `make llvm-build`.
+LLVM_BUILDDIR ?= llvm-build
+CLANG_SRC ?= llvm-project/clang
+LLD_SRC ?= llvm-project/lld
 
-TARGET ?= unix
+# Default tool selection.
+CLANG ?= clang-9
+LLVM_AR ?= llvm-ar-9
+LLVM_NM ?= llvm-nm-9
 
-ifeq ($(TARGET),unix)
-# Regular *nix system.
+# Go binary and GOROOT to select
+GO ?= go
+export GOROOT = $(shell $(GO) env GOROOT)
 
-else ifeq ($(TARGET),pca10040)
-# PCA10040: nRF52832 development board
-OBJCOPY = arm-none-eabi-objcopy
-TGOFLAGS += -target $(TARGET)
+# md5sum binary
+MD5SUM = md5sum
 
-else ifeq ($(TARGET),microbit)
-# BBC micro:bit
-OBJCOPY = arm-none-eabi-objcopy
-TGOFLAGS += -target $(TARGET)
+# tinygo binary for tests
+TINYGO ?= tinygo
 
-else ifeq ($(TARGET),reelboard)
-# reel board
-OBJCOPY = arm-none-eabi-objcopy
-TGOFLAGS += -target $(TARGET)
-
-else ifeq ($(TARGET),bluepill)
-# "blue pill" development board
-# See: https://wiki.stm32duino.com/index.php?title=Blue_Pill
-OBJCOPY = arm-none-eabi-objcopy
-TGOFLAGS += -target $(TARGET)
-
-else ifeq ($(TARGET),arduino)
-OBJCOPY = avr-objcopy
-TGOFLAGS += -target $(TARGET)
-
-else
-$(error Unknown target)
-
+# Use CCACHE for LLVM if possible
+ifneq (, $(shell which ccache))
+    LLVM_OPTION += '-DLLVM_CCACHE_BUILD=ON'
 endif
 
-LLVM_COMPONENTS = all-targets analysis asmparser asmprinter bitreader bitwriter codegen core coroutines debuginfodwarf executionengine instrumentation interpreter ipo irreader linker lto mc mcjit objcarcopts option profiledata scalaropts support target
+# Allow enabling LLVM assertions
+ifeq (1, $(ASSERT))
+    LLVM_OPTION += '-DLLVM_ENABLE_ASSERTIONS=ON'
+else
+    LLVM_OPTION += '-DLLVM_ENABLE_ASSERTIONS=OFF'
+endif
 
-CLANG_LIBS = -Wl,--start-group $(abspath $(LLVM_BUILDDIR))/lib/libclang.a -lclangAnalysis -lclangARCMigrate -lclangAST -lclangASTMatchers -lclangBasic -lclangCodeGen -lclangCrossTU -lclangDriver -lclangDynamicASTMatchers -lclangEdit -lclangFormat -lclangFrontend -lclangFrontendTool -lclangHandleCXX -lclangHandleLLVM -lclangIndex -lclangLex -lclangParse -lclangRewrite -lclangRewriteFrontend -lclangSema -lclangSerialization -lclangStaticAnalyzerCheckers -lclangStaticAnalyzerCore -lclangStaticAnalyzerFrontend -lclangTooling -lclangToolingASTDiff -lclangToolingCore -lclangToolingInclusions -lclangToolingRefactor -Wl,--end-group -lstdc++
+.PHONY: all tinygo test $(LLVM_BUILDDIR) llvm-source clean fmt gen-device gen-device-nrf gen-device-avr
 
-LLD_LIBS = -Wl,--start-group -llldCOFF -llldCommon -llldCore -llldDriver -llldELF -llldMachO -llldMinGW -llldReaderWriter -llldWasm -llldYAML -Wl,--end-group
+LLVM_COMPONENTS = all-targets analysis asmparser asmprinter bitreader bitwriter codegen core coroutines coverage debuginfodwarf executionengine instrumentation interpreter ipo irreader linker lto mc mcjit objcarcopts option profiledata scalaropts support target
+
+ifeq ($(OS),Windows_NT)
+    EXE = .exe
+    START_GROUP = -Wl,--start-group
+    END_GROUP = -Wl,--end-group
+
+    # LLVM compiled using MinGW on Windows appears to have problems with threads.
+    # Without this flag, linking results in errors like these:
+    #     libLLVMSupport.a(Threading.cpp.obj):Threading.cpp:(.text+0x55): undefined reference to `std::thread::hardware_concurrency()'
+    LLVM_OPTION += -DLLVM_ENABLE_THREADS=OFF
+
+    CGO_LDFLAGS += -static -static-libgcc -static-libstdc++
+    CGO_LDFLAGS_EXTRA += -lversion
+
+    # Build libclang manually because the CMake-based build system on Windows
+    # doesn't allow building libclang as a static library.
+    LIBCLANG_PATH = $(abspath build/libclang-custom.a)
+    LIBCLANG_FILES = $(abspath $(wildcard $(LLVM_BUILDDIR)/tools/clang/tools/libclang/CMakeFiles/libclang.dir/*.cpp.obj))
+
+    # Add the libclang dependency to the tinygo binary target.
+tinygo: $(LIBCLANG_PATH)
+test: $(LIBCLANG_PATH)
+    # Build libclang.
+$(LIBCLANG_PATH): $(LIBCLANG_FILES)
+	@mkdir -p build
+	ar rcs $(LIBCLANG_PATH) $^
+
+else ifeq ($(shell uname -s),Darwin)
+    MD5SUM = md5
+    LIBCLANG_PATH = $(abspath $(LLVM_BUILDDIR))/lib/libclang.a
+else ifeq ($(shell uname -s),FreeBSD)
+    MD5SUM = md5
+    LIBCLANG_PATH = $(abspath $(LLVM_BUILDDIR))/lib/libclang.a
+    START_GROUP = -Wl,--start-group
+    END_GROUP = -Wl,--end-group
+else
+    LIBCLANG_PATH = $(abspath $(LLVM_BUILDDIR))/lib/libclang.a
+    START_GROUP = -Wl,--start-group
+    END_GROUP = -Wl,--end-group
+endif
+
+CLANG_LIBS = $(START_GROUP) -lclangAnalysis -lclangARCMigrate -lclangAST -lclangASTMatchers -lclangBasic -lclangCodeGen -lclangCrossTU -lclangDriver -lclangDynamicASTMatchers -lclangEdit -lclangFormat -lclangFrontend -lclangFrontendTool -lclangHandleCXX -lclangHandleLLVM -lclangIndex -lclangLex -lclangParse -lclangRewrite -lclangRewriteFrontend -lclangSema -lclangSerialization -lclangStaticAnalyzerCheckers -lclangStaticAnalyzerCore -lclangStaticAnalyzerFrontend -lclangTooling -lclangToolingASTDiff -lclangToolingCore -lclangToolingInclusions $(END_GROUP) -lstdc++
+
+LLD_LIBS = $(START_GROUP) -llldCOFF -llldCommon -llldCore -llldDriver -llldELF -llldMachO -llldMinGW -llldReaderWriter -llldWasm -llldYAML $(END_GROUP)
 
 
 # For static linking.
-CGO_CPPFLAGS=$(shell $(LLVM_BUILDDIR)/bin/llvm-config --cppflags) -I$(abspath $(CLANG_SRC))/include -I$(abspath $(LLD_SRC))/include
-CGO_CXXFLAGS=-std=c++11
-CGO_LDFLAGS=-L$(LLVM_BUILDDIR)/lib $(CLANG_LIBS) $(LLD_LIBS) $(shell $(LLVM_BUILDDIR)/bin/llvm-config --ldflags --libs --system-libs $(LLVM_COMPONENTS))
-
-
-
-run-test: build/test
-	./build/test
-
-run-blinky: run-blinky2
-run-blinky2: build/blinky2
-	./build/blinky2
-
-ifeq ($(TARGET),pca10040)
-flash-%: build/%.hex
-	nrfjprog -f nrf52 --sectorerase --program $< --reset
-else ifeq ($(TARGET),microbit)
-flash-%: build/%.hex
-	openocd -f interface/cmsis-dap.cfg -f target/nrf51.cfg -c 'program $< reset exit'
-else ifeq ($(TARGET),reelboard)
-flash-%: build/%.hex
-	openocd -f interface/cmsis-dap.cfg -f target/nrf51.cfg -c 'program $< reset exit'
-else ifeq ($(TARGET),arduino)
-flash-%: build/%.hex
-	avrdude -c arduino -p atmega328p -P /dev/ttyACM0 -U flash:w:$<
-else ifeq ($(TARGET),bluepill)
-flash-%: build/%.hex
-	openocd -f interface/stlink-v2.cfg -f target/stm32f1x.cfg -c 'program $< reset exit'
+ifneq ("$(wildcard $(LLVM_BUILDDIR)/bin/llvm-config*)","")
+    CGO_CPPFLAGS=$(shell $(LLVM_BUILDDIR)/bin/llvm-config --cppflags) -I$(abspath $(LLVM_BUILDDIR))/tools/clang/include -I$(abspath $(CLANG_SRC))/include -I$(abspath $(LLD_SRC))/include
+    CGO_CXXFLAGS=-std=c++11
+    CGO_LDFLAGS+=$(LIBCLANG_PATH) -std=c++11 -L$(abspath $(LLVM_BUILDDIR)/lib) $(CLANG_LIBS) $(LLD_LIBS) $(shell $(LLVM_BUILDDIR)/bin/llvm-config --ldflags --libs --system-libs $(LLVM_COMPONENTS)) -lstdc++ $(CGO_LDFLAGS_EXTRA)
 endif
+
 
 clean:
 	@rm -rf build
 
+FMT_PATHS = ./*.go builder cgo compiler interp ir loader src/device/arm src/examples src/machine src/os src/reflect src/runtime src/sync src/syscall src/internal/reflectlite transform
 fmt:
-	@go fmt . ./compiler ./interp ./loader ./ir ./src/device/arm ./src/examples/* ./src/machine ./src/os ./src/runtime ./src/sync
-	@go fmt ./testdata/*.go
+	@gofmt -l -w $(FMT_PATHS)
+fmt-check:
+	@unformatted=$$(gofmt -l $(FMT_PATHS)); [ -z "$$unformatted" ] && exit 0; echo "Unformatted:"; for fn in $$unformatted; do echo "  $$fn"; done; exit 1
 
-test:
-	@go test -v .
 
-gen-device: gen-device-avr gen-device-nrf gen-device-sam gen-device-stm32
+gen-device: gen-device-avr gen-device-nrf gen-device-sam gen-device-sifive gen-device-stm32
 
 gen-device-avr:
-	./tools/gen-device-avr.py lib/avr/packs/atmega src/device/avr/
-	./tools/gen-device-avr.py lib/avr/packs/tiny src/device/avr/
-	go fmt ./src/device/avr
+	$(GO) build -o ./build/gen-device-avr ./tools/gen-device-avr/
+	./build/gen-device-avr lib/avr/packs/atmega src/device/avr/
+	./build/gen-device-avr lib/avr/packs/tiny src/device/avr/
+	@GO111MODULE=off $(GO) fmt ./src/device/avr
 
-gen-device-nrf:
-	./tools/gen-device-svd.py lib/nrfx/mdk/ src/device/nrf/ --source=https://github.com/NordicSemiconductor/nrfx/tree/master/mdk
-	go fmt ./src/device/nrf
+build/gen-device-svd: ./tools/gen-device-svd/*.go
+	$(GO) build -o $@ ./tools/gen-device-svd/
 
-gen-device-sam:
-	./tools/gen-device-svd.py lib/cmsis-svd/data/Atmel/ src/device/sam/ --source=https://github.com/posborne/cmsis-svd/tree/master/data/Atmel
-	go fmt ./src/device/sam
+gen-device-nrf: build/gen-device-svd
+	./build/gen-device-svd -source=https://github.com/NordicSemiconductor/nrfx/tree/master/mdk lib/nrfx/mdk/ src/device/nrf/
+	GO111MODULE=off $(GO) fmt ./src/device/nrf
 
-gen-device-stm32:
-	./tools/gen-device-svd.py lib/cmsis-svd/data/STMicro/ src/device/stm32/ --source=https://github.com/posborne/cmsis-svd/tree/master/data/STMicro
-	go fmt ./src/device/stm32
+gen-device-sam: build/gen-device-svd
+	./build/gen-device-svd -source=https://github.com/posborne/cmsis-svd/tree/master/data/Atmel lib/cmsis-svd/data/Atmel/ src/device/sam/
+	GO111MODULE=off $(GO) fmt ./src/device/sam
+
+gen-device-sifive: build/gen-device-svd
+	./build/gen-device-svd -source=https://github.com/posborne/cmsis-svd/tree/master/data/SiFive-Community -interrupts=software lib/cmsis-svd/data/SiFive-Community/ src/device/sifive/
+	GO111MODULE=off $(GO) fmt ./src/device/sifive
+
+gen-device-stm32: build/gen-device-svd
+	./build/gen-device-svd -source=https://github.com/posborne/cmsis-svd/tree/master/data/STMicro lib/cmsis-svd/data/STMicro/ src/device/stm32/
+	GO111MODULE=off $(GO) fmt ./src/device/stm32
+
+
+# Get LLVM sources.
+llvm-project/README.md:
+	git clone -b release/9.x https://github.com/llvm/llvm-project
+llvm-source: llvm-project/README.md
+
+# Configure LLVM.
+TINYGO_SOURCE_DIR=$(shell pwd)
+$(LLVM_BUILDDIR)/build.ninja: llvm-source
+	mkdir -p $(LLVM_BUILDDIR); cd $(LLVM_BUILDDIR); cmake -G Ninja $(TINYGO_SOURCE_DIR)/llvm-project/llvm "-DLLVM_TARGETS_TO_BUILD=X86;ARM;AArch64;RISCV;WebAssembly" "-DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=AVR" -DCMAKE_BUILD_TYPE=Release -DLIBCLANG_BUILD_STATIC=ON -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_PROJECTS="clang;lld" -DLLVM_TOOL_CLANG_TOOLS_EXTRA_BUILD=OFF $(LLVM_OPTION)
+
+# Build LLVM.
+$(LLVM_BUILDDIR): $(LLVM_BUILDDIR)/build.ninja
+	cd $(LLVM_BUILDDIR); ninja
+
+
+# Build wasi-libc sysroot
+.PHONY: wasi-libc
+wasi-libc: lib/wasi-libc/sysroot/lib/wasm32-wasi/libc.a
+lib/wasi-libc/sysroot/lib/wasm32-wasi/libc.a:
+	cd lib/wasi-libc && make -j4 WASM_CC=$(CLANG) WASM_AR=$(LLVM_AR) WASM_NM=$(LLVM_NM)
+
 
 # Build the Go compiler.
 tinygo:
-	@mkdir -p build
-	go build -o build/tinygo .
+	@if [ ! -f "$(LLVM_BUILDDIR)/bin/llvm-config" ]; then echo "Fetch and build LLVM first by running:"; echo "  make llvm-source"; echo "  make $(LLVM_BUILDDIR)"; exit 1; fi
+	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GO) build -o build/tinygo$(EXE) -tags byollvm .
 
-static:
-	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -o build/tinygo -tags byollvm .
+test: wasi-libc
+	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GO) test -v -tags byollvm ./cgo ./compileopts ./interp ./transform .
 
-release: static gen-device
+tinygo-test:
+	cd tests/tinygotest && tinygo test
+
+.PHONY: smoketest
+smoketest:
+	$(TINYGO) version
+	# test all examples
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/adc
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/blinkm
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/blinky2
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/button
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/button2
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/echo
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=circuitplay-express examples/i2s
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/mcp3008
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=microbit            examples/microbit-blink
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/pwm
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/serial
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/systick
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/test
+	@$(MD5SUM) test.hex
+	# test simulated boards on play.tinygo.org
+	$(TINYGO) build             -o test.wasm -tags=arduino              examples/blinky1
+	@$(MD5SUM) test.wasm
+	$(TINYGO) build             -o test.wasm -tags=hifive1b             examples/blinky1
+	@$(MD5SUM) test.wasm
+	$(TINYGO) build             -o test.wasm -tags=reelboard            examples/blinky1
+	@$(MD5SUM) test.wasm
+	$(TINYGO) build             -o test.wasm -tags=pca10040             examples/blinky2
+	@$(MD5SUM) test.wasm
+	$(TINYGO) build             -o test.wasm -tags=pca10056             examples/blinky2
+	@$(MD5SUM) test.wasm
+	$(TINYGO) build             -o test.wasm -tags=circuitplay_express  examples/blinky1
+	@$(MD5SUM) test.wasm
+	# test all targets/boards
+	$(TINYGO) build -size short -o test.hex -target=pca10040-s132v6     examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=microbit            examples/echo
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=nrf52840-mdk        examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10031            examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=bluepill            examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=reelboard           examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=reelboard           examples/blinky2
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10056            examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10056            examples/blinky2
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=itsybitsy-m0        examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=feather-m0          examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=trinket-m0          examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=circuitplay-express examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=stm32f4disco        examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=stm32f4disco        examples/blinky2
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=circuitplay-bluefruit examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=circuitplay-express examples/i2s
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.gba -target=gameboy-advance     examples/gba-display
+	@$(MD5SUM) test.gba
+	$(TINYGO) build -size short -o test.hex -target=itsybitsy-m4        examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=feather-m4          examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pybadge             examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=metro-m4-airlift    examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pyportal            examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=nucleo-f103rb       examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pinetime-devkit0    examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=x9pro               examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pca10056-s140v7     examples/blinky1
+	@$(MD5SUM) test.hex
+ifneq ($(AVR), 0)
+	$(TINYGO) build -size short -o test.hex -target=arduino             examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=arduino-nano        examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=digispark           examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=digispark -gc=leaking examples/blinky1
+	@$(MD5SUM) test.hex
+endif
+	$(TINYGO) build -size short -o test.hex -target=hifive1b            examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build             -o wasm.wasm -target=wasm               examples/wasm/export
+	$(TINYGO) build             -o wasm.wasm -target=wasm               examples/wasm/main
+
+release: tinygo gen-device wasi-libc
 	@mkdir -p build/release/tinygo/bin
+	@mkdir -p build/release/tinygo/lib/clang/include
 	@mkdir -p build/release/tinygo/lib/CMSIS/CMSIS
 	@mkdir -p build/release/tinygo/lib/compiler-rt/lib
 	@mkdir -p build/release/tinygo/lib/nrfx
+	@mkdir -p build/release/tinygo/lib/wasi-libc
 	@mkdir -p build/release/tinygo/pkg/armv6m-none-eabi
 	@mkdir -p build/release/tinygo/pkg/armv7m-none-eabi
 	@mkdir -p build/release/tinygo/pkg/armv7em-none-eabi
-	@cp -p  build/tinygo                 build/release/tinygo/bin
+	@echo copying source files
+	@cp -p  build/tinygo$(EXE)           build/release/tinygo/bin
+	@cp -p $(abspath $(CLANG_SRC))/lib/Headers/*.h build/release/tinygo/lib/clang/include
 	@cp -rp lib/CMSIS/CMSIS/Include      build/release/tinygo/lib/CMSIS/CMSIS
 	@cp -rp lib/CMSIS/README.md          build/release/tinygo/lib/CMSIS
 	@cp -rp lib/compiler-rt/lib/builtins build/release/tinygo/lib/compiler-rt/lib
 	@cp -rp lib/compiler-rt/LICENSE.TXT  build/release/tinygo/lib/compiler-rt
 	@cp -rp lib/compiler-rt/README.txt   build/release/tinygo/lib/compiler-rt
 	@cp -rp lib/nrfx/*                   build/release/tinygo/lib/nrfx
+	@cp -rp lib/wasi-libc/sysroot        build/release/tinygo/lib/wasi-libc/sysroot
 	@cp -rp src                          build/release/tinygo/src
 	@cp -rp targets                      build/release/tinygo/targets
 	./build/tinygo build-builtins -target=armv6m-none-eabi  -o build/release/tinygo/pkg/armv6m-none-eabi/compiler-rt.a
 	./build/tinygo build-builtins -target=armv7m-none-eabi  -o build/release/tinygo/pkg/armv7m-none-eabi/compiler-rt.a
 	./build/tinygo build-builtins -target=armv7em-none-eabi -o build/release/tinygo/pkg/armv7em-none-eabi/compiler-rt.a
 	tar -czf build/release.tar.gz -C build/release tinygo
-
-# Binary that can run on the host.
-build/%: src/examples/% src/examples/%/*.go build/tinygo src/runtime/*.go
-	./build/tinygo build $(TGOFLAGS) -size=short -o $@ $(subst src/,,$<)
-
-# ELF file that can run on a microcontroller.
-build/%.elf: src/examples/% src/examples/%/*.go build/tinygo src/runtime/*.go
-	./build/tinygo build $(TGOFLAGS) -size=short -o $@ $(subst src/,,$<)
-
-# Convert executable to Intel hex file (for flashing).
-build/%.hex: build/%.elf
-	$(OBJCOPY) -O ihex $^ $@

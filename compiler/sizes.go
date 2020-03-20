@@ -107,6 +107,12 @@ func (s *StdSizes) Sizeof(T types.Type) int64 {
 		if k == types.Uintptr {
 			return s.PtrSize
 		}
+		if k == types.UnsafePointer {
+			return s.PtrSize
+		}
+		if k == types.Invalid {
+			return 0 // only relevant when there is a type error somewhere
+		}
 		panic("unknown basic type: " + t.String())
 	case *types.Array:
 		n := t.Len()
@@ -125,11 +131,21 @@ func (s *StdSizes) Sizeof(T types.Type) int64 {
 			return 0
 		}
 		fields := make([]*types.Var, t.NumFields())
+		maxAlign := int64(1)
 		for i := range fields {
-			fields[i] = t.Field(i)
+			field := t.Field(i)
+			fields[i] = field
+			al := s.Alignof(field.Type())
+			if al > maxAlign {
+				maxAlign = al
+			}
 		}
+		// Pick the size that fits this struct and add some alignment. Some
+		// structs have some extra padding at the end which should also be taken
+		// care of:
+		//     struct { int32 n; byte b }
 		offsets := s.Offsetsof(fields)
-		return offsets[n-1] + s.Sizeof(fields[n-1].Type())
+		return align(offsets[n-1]+s.Sizeof(fields[n-1].Type()), maxAlign)
 	case *types.Interface:
 		return s.PtrSize * 2
 	case *types.Pointer:

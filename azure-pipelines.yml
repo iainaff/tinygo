@@ -1,0 +1,84 @@
+# Avoid lengthy LLVM rebuilds on each newly pushed branch. Pull requests will
+# be built anyway.
+trigger:
+- master
+- dev
+
+jobs:
+- job: Build
+  timeoutInMinutes: 240 # 4h
+  pool:
+    vmImage: 'VS2017-Win2016'
+  steps:
+    - checkout: self
+    - task: CacheBeta@0
+      displayName: Cache LLVM source
+      inputs:
+        key: llvm-source-9-windows-v0
+        path: llvm-project
+    - task: Bash@3
+      displayName: Download LLVM source
+      inputs:
+        targetType: inline
+        script: make llvm-source
+    - task: CacheBeta@0
+      displayName: Cache LLVM build
+      inputs:
+        key: llvm-build-9-windows-v0
+        path: llvm-build
+    - task: Bash@3
+      displayName: Build LLVM
+      inputs:
+        targetType: inline
+        script: |
+          if [ ! -f llvm-build/lib/liblldELF.a ]
+          then
+            choco install ninja
+            # LLVM 9 cannot be built with MinGW 8.
+            # For details: https://reviews.llvm.org/D70266
+            choco uninstall mingw
+            choco install mingw --version=7.3.0
+            make llvm-build
+          fi
+    - task: Bash@3
+      displayName: Install QEMU
+      inputs:
+        targetType: inline
+        script: choco install qemu
+    - task: CacheBeta@0
+      displayName: Cache wasi-libc sysroot
+      inputs:
+        key: wasi-libc-sysroot-v0
+        path: lib/wasi-libc/sysroot
+    - task: Bash@3
+      displayName: Build wasi-libc
+      inputs:
+        targetType: inline
+        script: PATH=/usr/bin:$PATH make wasi-libc CLANG=$PWD/llvm-build/bin/clang LLVM_AR=$PWD/llvm-build/bin/llvm-ar LLVM_NM=$PWD/llvm-build/bin/llvm-nm
+    - task: Bash@3
+      displayName: Test TinyGo
+      inputs:
+        targetType: inline
+        script: |
+          export PATH="/c/Go1.13/bin:$PATH:./llvm-build/bin:/c/Program Files/qemu"
+          unset GOROOT
+          make test
+    - task: Bash@3
+      displayName: Build TinyGo release tarball
+      inputs:
+        targetType: inline
+        script: |
+          export PATH="/c/Go1.13/bin:$PATH:./llvm-build/bin:/c/Program Files/qemu"
+          unset GOROOT
+          make release -j4
+    - publish: $(System.DefaultWorkingDirectory)/build/release/tinygo
+      displayName: Publish zip as artifact
+      artifact: tinygo
+    - task: Bash@3
+      displayName: Smoke tests
+      inputs:
+        targetType: inline
+        script: |
+          export PATH="/c/Go1.13/bin:$PATH:./llvm-build/bin:/c/Program Files/qemu"
+          unset GOROOT
+          make smoketest TINYGO=build/tinygo AVR=0

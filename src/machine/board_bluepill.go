@@ -1,6 +1,11 @@
-// +build stm32,bluepill
+// +build bluepill
 
 package machine
+
+import (
+	"device/stm32"
+	"runtime/interrupt"
+)
 
 // https://wiki.stm32duino.com/index.php?title=File:Bluepillpinout.gif
 const (
@@ -47,9 +52,25 @@ const (
 
 // UART pins
 const (
-	UART_TX_PIN = PA9
-	UART_RX_PIN = PA10
+	UART_TX_PIN     = PA9
+	UART_RX_PIN     = PA10
+	UART_ALT_TX_PIN = PB6
+	UART_ALT_RX_PIN = PB7
 )
+
+var (
+	// USART1 is the first hardware serial port on the STM32.
+	// Both UART0 and UART1 refer to USART1.
+	UART0 = UART{
+		Buffer: NewRingBuffer(),
+		Bus:    stm32.USART1,
+	}
+	UART1 = &UART0
+)
+
+func init() {
+	UART0.Interrupt = interrupt.New(stm32.IRQ_USART1, UART0.handleInterrupt)
+}
 
 // SPI pins
 const (

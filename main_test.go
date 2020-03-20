@@ -10,19 +10,25 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/tinygo-org/tinygo/compileopts"
+	"github.com/tinygo-org/tinygo/loader"
 )
 
 const TESTDATA = "testdata"
 
 func TestCompiler(t *testing.T) {
-	matches, err := filepath.Glob(TESTDATA + "/*.go")
+	matches, err := filepath.Glob(filepath.Join(TESTDATA, "*.go"))
 	if err != nil {
 		t.Fatal("could not read test files:", err)
 	}
 
-	dirMatches, err := filepath.Glob(TESTDATA + "/*/main.go")
+	dirMatches, err := filepath.Glob(filepath.Join(TESTDATA, "*", "main.go"))
 	if err != nil {
 		t.Fatal("could not read test packages:", err)
 	}
@@ -35,17 +41,9 @@ func TestCompiler(t *testing.T) {
 
 	sort.Strings(matches)
 
-	// Create a temporary directory for test output files.
-	tmpdir, err := ioutil.TempDir("", "tinygo-test")
-	if err != nil {
-		t.Fatal("could not create temporary directory:", err)
-	}
-	defer os.RemoveAll(tmpdir)
-
-	t.Log("running tests on host...")
-	for _, path := range matches {
-		t.Run(path, func(t *testing.T) {
-			runTest(path, tmpdir, "", t)
+	if runtime.GOOS != "windows" {
+		t.Run("Host", func(t *testing.T) {
+			runPlatTests("", matches, t)
 		})
 	}
 
@@ -53,72 +51,105 @@ func TestCompiler(t *testing.T) {
 		return
 	}
 
-	t.Log("running tests for linux/arm...")
-	for _, path := range matches {
-		if path == "testdata/cgo/" {
-			continue // TODO: improve CGo
-		}
-		t.Run(path, func(t *testing.T) {
-			runTest(path, tmpdir, "arm--linux-gnueabi", t)
-		})
-	}
+	t.Run("EmulatedCortexM3", func(t *testing.T) {
+		runPlatTests("cortex-m-qemu", matches, t)
+	})
 
-	t.Log("running tests for linux/arm64...")
-	for _, path := range matches {
-		if path == "testdata/cgo/" {
-			continue // TODO: improve CGo
-		}
-		t.Run(path, func(t *testing.T) {
-			runTest(path, tmpdir, "aarch64--linux-gnueabi", t)
+	if runtime.GOOS == "linux" {
+		t.Run("ARMLinux", func(t *testing.T) {
+			runPlatTests("arm--linux-gnueabihf", matches, t)
 		})
-	}
-
-	t.Log("running tests for emulated cortex-m3...")
-	for _, path := range matches {
-		t.Run(path, func(t *testing.T) {
-			runTest(path, tmpdir, "qemu", t)
+		t.Run("ARM64Linux", func(t *testing.T) {
+			runPlatTests("aarch64--linux-gnu", matches, t)
+		})
+		t.Run("WebAssembly", func(t *testing.T) {
+			runPlatTests("wasm", matches, t)
 		})
 	}
 }
 
-func runTest(path, tmpdir string, target string, t *testing.T) {
+func runPlatTests(target string, matches []string, t *testing.T) {
+	t.Parallel()
+
+	for _, path := range matches {
+		path := path // redefine to avoid race condition
+
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			t.Parallel()
+
+			runTest(path, target, t)
+		})
+	}
+}
+
+// Due to some problems with LLD, we cannot run links in parallel, or in parallel with compiles.
+// Therefore, we put a lock around builds and run everything else in parallel.
+var buildLock sync.Mutex
+
+// runBuild is a thread-safe wrapper around Build.
+func runBuild(src, out string, opts *compileopts.Options) error {
+	buildLock.Lock()
+	defer buildLock.Unlock()
+
+	return Build(src, out, opts)
+}
+
+func runTest(path, target string, t *testing.T) {
 	// Get the expected output for this test.
 	txtpath := path[:len(path)-3] + ".txt"
-	if path[len(path)-1] == '/' {
+	if path[len(path)-1] == os.PathSeparator {
 		txtpath = path + "out.txt"
 	}
-	f, err := os.Open(txtpath)
-	if err != nil {
-		t.Fatal("could not open expected output file:", err)
-	}
-	expected, err := ioutil.ReadAll(f)
+	expected, err := ioutil.ReadFile(txtpath)
 	if err != nil {
 		t.Fatal("could not read expected output file:", err)
 	}
 
+	// Create a temporary directory for test output files.
+	tmpdir, err := ioutil.TempDir("", "tinygo-test")
+	if err != nil {
+		t.Fatal("could not create temporary directory:", err)
+	}
+	defer func() {
+		rerr := os.RemoveAll(tmpdir)
+		if rerr != nil {
+			t.Errorf("failed to remove temporary directory %q: %s", tmpdir, rerr.Error())
+		}
+	}()
+
 	// Build the test binary.
-	config := &BuildConfig{
-		opt:        "z",
-		printIR:    false,
-		dumpSSA:    false,
-		debug:      false,
-		printSizes: "",
-		initInterp: true,
+	config := &compileopts.Options{
+		Target:     target,
+		Opt:        "z",
+		PrintIR:    false,
+		DumpSSA:    false,
+		VerifyIR:   true,
+		Debug:      false,
+		PrintSizes: "",
+		WasmAbi:    "js",
 	}
 	binary := filepath.Join(tmpdir, "test")
-	err = Build("./"+path, binary, target, config)
+	err = runBuild("./"+path, binary, config)
 	if err != nil {
-		t.Log("failed to build:", err)
+		if errLoader, ok := err.(loader.Errors); ok {
+			for _, err := range errLoader.Errs {
+				t.Log("failed to build:", err)
+			}
+		} else {
+			t.Log("failed to build:", err)
+		}
 		t.Fail()
 		return
 	}
 
 	// Run the test.
+	runComplete := make(chan struct{})
 	var cmd *exec.Cmd
+	ranTooLong := false
 	if target == "" {
 		cmd = exec.Command(binary)
 	} else {
-		spec, err := LoadTarget(target)
+		spec, err := compileopts.LoadTarget(target)
 		if err != nil {
 			t.Fatal("failed to load target spec:", err)
 		}
@@ -130,16 +161,39 @@ func runTest(path, tmpdir string, target string, t *testing.T) {
 	}
 	stdout := &bytes.Buffer{}
 	cmd.Stdout = stdout
-	if target != "" {
-		cmd.Stderr = os.Stderr
+	cmd.Stderr = os.Stderr
+	err = cmd.Start()
+	if err != nil {
+		t.Fatal("failed to start:", err)
 	}
-	err = cmd.Run()
+	go func() {
+		// Terminate the process if it runs too long.
+		timer := time.NewTimer(1 * time.Second)
+		select {
+		case <-runComplete:
+			timer.Stop()
+		case <-timer.C:
+			ranTooLong = true
+			if runtime.GOOS == "windows" {
+				cmd.Process.Signal(os.Kill) // Windows doesn't support SIGINT.
+			} else {
+				cmd.Process.Signal(os.Interrupt)
+			}
+		}
+	}()
+	err = cmd.Wait()
 	if _, ok := err.(*exec.ExitError); ok && target != "" {
 		err = nil // workaround for QEMU
+	}
+	close(runComplete)
+
+	if ranTooLong {
+		stdout.WriteString("--- test ran too long, terminating...\n")
 	}
 
 	// putchar() prints CRLF, convert it to LF.
 	actual := bytes.Replace(stdout.Bytes(), []byte{'\r', '\n'}, []byte{'\n'}, -1)
+	expected = bytes.Replace(expected, []byte{'\r', '\n'}, []byte{'\n'}, -1) // for Windows
 
 	// Check whether the command ran successfully.
 	fail := false

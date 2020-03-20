@@ -1,4 +1,4 @@
-// +build wasm,!tinygo.arm,!avr
+// +build wasm
 
 package runtime
 
@@ -12,11 +12,14 @@ const GOARCH = "wasm"
 const TargetBits = 32
 
 //go:extern __heap_base
-var heapStartSymbol unsafe.Pointer
+var heapStartSymbol [0]byte
+
+//go:export llvm.wasm.memory.size.i32
+func wasm_memory_size(index int32) int32
 
 var (
 	heapStart = uintptr(unsafe.Pointer(&heapStartSymbol))
-	heapEnd   = (heapStart + wasmPageSize - 1) &^ (wasmPageSize - 1) // conservative guess: one page of heap memory
+	heapEnd   = uintptr(wasm_memory_size(0) * wasmPageSize)
 )
 
 const wasmPageSize = 64 * 1024
@@ -25,3 +28,5 @@ const wasmPageSize = 64 * 1024
 func align(ptr uintptr) uintptr {
 	return (ptr + 3) &^ 3
 }
+
+func getCurrentStackPointer() uintptr

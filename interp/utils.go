@@ -16,50 +16,6 @@ func getUses(value llvm.Value) []llvm.Value {
 	return uses
 }
 
-// Return a zero LLVM value for any LLVM type. Setting this value as an
-// initializer has the same effect as setting 'zeroinitializer' on a value.
-// Sadly, I haven't found a way to do it directly with the Go API but this works
-// just fine.
-func getZeroValue(typ llvm.Type) llvm.Value {
-	switch typ.TypeKind() {
-	case llvm.ArrayTypeKind:
-		subTyp := typ.ElementType()
-		subVal := getZeroValue(subTyp)
-		vals := make([]llvm.Value, typ.ArrayLength())
-		for i := range vals {
-			vals[i] = subVal
-		}
-		return llvm.ConstArray(subTyp, vals)
-	case llvm.FloatTypeKind, llvm.DoubleTypeKind:
-		return llvm.ConstFloat(typ, 0.0)
-	case llvm.IntegerTypeKind:
-		return llvm.ConstInt(typ, 0, false)
-	case llvm.PointerTypeKind:
-		return llvm.ConstPointerNull(typ)
-	case llvm.StructTypeKind:
-		types := typ.StructElementTypes()
-		vals := make([]llvm.Value, len(types))
-		for i, subTyp := range types {
-			val := getZeroValue(subTyp)
-			vals[i] = val
-		}
-		if typ.StructName() != "" {
-			return llvm.ConstNamedStruct(typ, vals)
-		} else {
-			return typ.Context().ConstStruct(vals, false)
-		}
-	case llvm.VectorTypeKind:
-		zero := getZeroValue(typ.ElementType())
-		vals := make([]llvm.Value, typ.VectorSize())
-		for i := range vals {
-			vals[i] = zero
-		}
-		return llvm.ConstVector(vals, false)
-	default:
-		panic("interp: unknown LLVM type: " + typ.String())
-	}
-}
-
 // getStringBytes loads the byte slice of a Go string represented as a
 // {ptr, len} pair.
 func getStringBytes(strPtr Value, strLen llvm.Value) []byte {
@@ -68,7 +24,11 @@ func getStringBytes(strPtr Value, strLen llvm.Value) []byte {
 	}
 	buf := make([]byte, strLen.ZExtValue())
 	for i := range buf {
-		c := strPtr.GetElementPtr([]uint32{uint32(i)}).Load()
+		gep, err := strPtr.GetElementPtr([]uint32{uint32(i)})
+		if err != nil {
+			panic(err) // TODO
+		}
+		c := gep.Load()
 		buf[i] = byte(c.ZExtValue())
 	}
 	return buf
@@ -93,4 +53,69 @@ func isScalar(t llvm.Type) bool {
 	default:
 		return false
 	}
+}
+
+// isPointerNil returns whether this is a nil pointer or not. The ok value
+// indicates whether the result is certain: if it is false the result boolean is
+// not valid.
+func isPointerNil(v llvm.Value) (result bool, ok bool) {
+	if !v.IsAConstantExpr().IsNil() {
+		switch v.Opcode() {
+		case llvm.IntToPtr:
+			// Whether a constant inttoptr is nil is easy to
+			// determine.
+			result, ok = isZero(v.Operand(0))
+			if ok {
+				return
+			}
+		case llvm.BitCast, llvm.GetElementPtr:
+			// These const instructions are just a kind of wrappers for the
+			// underlying pointer.
+			return isPointerNil(v.Operand(0))
+		}
+	}
+	if !v.IsAConstantPointerNull().IsNil() {
+		// A constant pointer null is always null, of course.
+		return true, true
+	}
+	if !v.IsAGlobalValue().IsNil() {
+		// A global value is never null.
+		return false, true
+	}
+	return false, false // not valid
+}
+
+// isZero returns whether the value in v is the integer zero, and whether that
+// can be known right now.
+func isZero(v llvm.Value) (result bool, ok bool) {
+	if !v.IsAConstantExpr().IsNil() {
+		switch v.Opcode() {
+		case llvm.PtrToInt:
+			return isPointerNil(v.Operand(0))
+		}
+	}
+	if !v.IsAConstantInt().IsNil() {
+		val := v.ZExtValue()
+		return val == 0, true
+	}
+	return false, false // not valid
+}
+
+// unwrap returns the underlying value, with GEPs removed. This can be useful to
+// get the underlying global of a GEP pointer.
+func unwrap(value llvm.Value) llvm.Value {
+	for {
+		if !value.IsAConstantExpr().IsNil() {
+			switch value.Opcode() {
+			case llvm.GetElementPtr:
+				value = value.Operand(0)
+				continue
+			}
+		} else if !value.IsAGetElementPtrInst().IsNil() {
+			value = value.Operand(0)
+			continue
+		}
+		break
+	}
+	return value
 }

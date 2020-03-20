@@ -27,38 +27,29 @@ func _recover() interface{} {
 	return nil
 }
 
-// Check for bounds in *ssa.Index, *ssa.IndexAddr and *ssa.Lookup.
-func lookupBoundsCheck(length uintptr, index int) {
-	if index < 0 || index >= int(length) {
-		runtimePanic("index out of range")
-	}
+// See emitNilCheck in compiler/asserts.go.
+// This function is a dummy function that has its first and only parameter
+// marked 'nocapture' to work around a limitation in LLVM: a regular pointer
+// comparison captures the pointer.
+func isnil(ptr *uint8) bool {
+	return ptr == nil
 }
 
-// Check for bounds in *ssa.Index, *ssa.IndexAddr and *ssa.Lookup.
-// Supports 64-bit indexes.
-func lookupBoundsCheckLong(length uintptr, index int64) {
-	if index < 0 || index >= int64(length) {
-		runtimePanic("index out of range")
-	}
+// Panic when trying to dereference a nil pointer.
+func nilPanic() {
+	runtimePanic("nil pointer dereference")
 }
 
-// Check for bounds in *ssa.Slice.
-func sliceBoundsCheck(capacity, low, high uintptr) {
-	if !(0 <= low && low <= high && high <= capacity) {
-		runtimePanic("slice out of range")
-	}
+// Panic when trying to acces an array or slice out of bounds.
+func lookupPanic() {
+	runtimePanic("index out of range")
 }
 
-// Check for bounds in *ssa.Slice. Supports 64-bit indexes.
-func sliceBoundsCheck64(capacity uintptr, low, high uint64) {
-	if !(0 <= low && low <= high && high <= uint64(capacity)) {
-		runtimePanic("slice out of range")
-	}
+// Panic when trying to slice a slice out of bounds.
+func slicePanic() {
+	runtimePanic("slice out of range")
 }
 
-// Check for bounds in *ssa.MakeSlice.
-func sliceBoundsCheckMake(length, capacity uint) {
-	if !(0 <= length && length <= capacity) {
-		runtimePanic("slice size out of range")
-	}
+func blockingPanic() {
+	runtimePanic("trying to do blocking operation in exported function")
 }

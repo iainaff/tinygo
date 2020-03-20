@@ -4,6 +4,22 @@ type Thing struct {
 	name string
 }
 
+type ThingOption func(*Thing)
+
+func WithName(name string) ThingOption {
+	return func(t *Thing) {
+		t.name = name
+	}
+}
+
+func NewThing(opts ...ThingOption) *Thing {
+	t := &Thing{}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
+}
+
 func (t Thing) String() string {
 	return t.name
 }
@@ -25,6 +41,9 @@ func main() {
 	// deferred functions
 	testDefer()
 
+	// defers in loop
+	testDeferLoop()
+
 	// Take a bound method and use it as a function pointer.
 	// This function pointer needs a context pointer.
 	testBound(thing.String)
@@ -36,6 +55,12 @@ func main() {
 	runFunc(func(i int) {
 		println("inside fp closure:", thing.String(), i)
 	}, 3)
+
+	// functional arguments
+	thingFunctionalArgs1 := NewThing()
+	thingFunctionalArgs1.Print("functional args 1")
+	thingFunctionalArgs2 := NewThing(WithName("named thing"))
+	thingFunctionalArgs2.Print("functional args 2")
 }
 
 func runFunc(f func(int), arg int) {
@@ -61,6 +86,12 @@ func testDefer() {
 	defer t.Print("bar")
 
 	println("deferring...")
+}
+
+func testDeferLoop() {
+	for j := 0; j < 4; j++ {
+		defer deferred("loop", j)
+	}
 }
 
 func deferred(msg string, i int) {
