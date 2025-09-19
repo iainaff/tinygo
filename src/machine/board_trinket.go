@@ -1,14 +1,9 @@
-// +build sam,atsamd21,trinket_m0
+//go:build sam && atsamd21 && trinket_m0
 
 package machine
 
-import (
-	"device/sam"
-	"runtime/interrupt"
-)
-
 // used to reset into bootloader
-const RESET_MAGIC_VALUE = 0xf01669ef
+const resetMagicValue = 0xf01669ef
 
 // GPIO Pins
 const (
@@ -33,7 +28,7 @@ const (
 	LED = D13
 )
 
-// UART0 aka USBCDC pins
+// USBCDC pins
 const (
 	USBCDC_DM_PIN = PA24
 	USBCDC_DP_PIN = PA25
@@ -46,32 +41,17 @@ const (
 )
 
 // UART1 on the Trinket M0.
-var (
-	UART1 = UART{
-		Buffer: NewRingBuffer(),
-		Bus:    sam.SERCOM0_USART,
-		SERCOM: 0,
-	}
-)
-
-func init() {
-	UART1.Interrupt = interrupt.New(sam.IRQ_SERCOM0, UART1.handleInterrupt)
-}
+var UART1 = &sercomUSART0
 
 // SPI pins
 const (
-	SPI0_SCK_PIN  = D3
-	SPI0_MOSI_PIN = D4
-	SPI0_MISO_PIN = D2
+	SPI0_SCK_PIN = D3
+	SPI0_SDO_PIN = D4
+	SPI0_SDI_PIN = D2
 )
 
 // SPI on the Trinket M0.
-var (
-	SPI0 = SPI{
-		Bus:    sam.SERCOM0_SPI,
-		SERCOM: 0,
-	}
-)
+var SPI0 = sercomSPIM0
 
 // I2C pins
 const (
@@ -81,15 +61,28 @@ const (
 
 // I2C on the Trinket M0.
 var (
-	I2C0 = I2C{
-		Bus:    sam.SERCOM2_I2CM,
-		SERCOM: 2,
-	}
+	I2C0 = sercomI2CM2
 )
 
 // I2S pins
 const (
 	I2S_SCK_PIN = PA10
-	I2S_SD_PIN  = PA08
+	I2S_SDO_PIN = PA08
+	I2S_SDI_PIN = NoPin // TODO: figure out what this is on Trinket M0.
 	I2S_WS_PIN  = NoPin // TODO: figure out what this is on Trinket M0.
+)
+
+// USB CDC identifiers
+const (
+	usb_STRING_PRODUCT      = "Adafruit Trinket M0"
+	usb_STRING_MANUFACTURER = "Adafruit"
+)
+
+var (
+	usb_VID uint16 = 0x239A
+	usb_PID uint16 = 0x801E
+)
+
+var (
+	DefaultUART = UART1
 )

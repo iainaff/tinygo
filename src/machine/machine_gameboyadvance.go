@@ -1,63 +1,64 @@
-// +build gameboyadvance
+//go:build gameboyadvance
 
 package machine
 
 import (
+	"device/gba"
+
 	"image/color"
 	"runtime/volatile"
 	"unsafe"
 )
 
+// Not sure what name to pick here. Not using ARM7TDMI because that's the CPU
+// name, not the device name.
+const deviceName = "GBA"
+
 // Interrupt numbers as used on the GameBoy Advance. Register them with
 // runtime/interrupt.New.
 const (
-	IRQ_VBLANK  = 0
-	IRQ_HBLANK  = 1
-	IRQ_VCOUNT  = 2
-	IRQ_TIMER0  = 3
-	IRQ_TIMER1  = 4
-	IRQ_TIMER2  = 5
-	IRQ_TIMER3  = 6
-	IRQ_COM     = 7
-	IRQ_DMA0    = 8
-	IRQ_DMA1    = 9
-	IRQ_DMA2    = 10
-	IRQ_DMA3    = 11
-	IRQ_KEYPAD  = 12
-	IRQ_GAMEPAK = 13
+	IRQ_VBLANK  = gba.IRQ_VBLANK
+	IRQ_HBLANK  = gba.IRQ_HBLANK
+	IRQ_VCOUNT  = gba.IRQ_VCOUNT
+	IRQ_TIMER0  = gba.IRQ_TIMER0
+	IRQ_TIMER1  = gba.IRQ_TIMER1
+	IRQ_TIMER2  = gba.IRQ_TIMER2
+	IRQ_TIMER3  = gba.IRQ_TIMER3
+	IRQ_COM     = gba.IRQ_COM
+	IRQ_DMA0    = gba.IRQ_DMA0
+	IRQ_DMA1    = gba.IRQ_DMA1
+	IRQ_DMA2    = gba.IRQ_DMA2
+	IRQ_DMA3    = gba.IRQ_DMA3
+	IRQ_KEYPAD  = gba.IRQ_KEYPAD
+	IRQ_GAMEPAK = gba.IRQ_GAMEPAK
 )
-
-// Make it easier to directly write to I/O RAM.
-var ioram = (*[0x400]volatile.Register8)(unsafe.Pointer(uintptr(0x04000000)))
-
-type PinMode uint8
 
 // Set has not been implemented.
 func (p Pin) Set(value bool) {
 	// do nothing
 }
 
-var Display = FramebufDisplay{(*[160][240]volatile.Register16)(unsafe.Pointer(uintptr(0x06000000)))}
+var Display = DisplayMode3{(*[160][240]volatile.Register16)(unsafe.Pointer(uintptr(gba.MEM_VRAM)))}
 
-type FramebufDisplay struct {
+type DisplayMode3 struct {
 	port *[160][240]volatile.Register16
 }
 
-func (d FramebufDisplay) Configure() {
-	// Write into the I/O registers, setting video display parameters.
-	ioram[0].Set(0x03) // Use video mode 3 (in BG2, a 16bpp bitmap in VRAM)
-	ioram[1].Set(0x04) // Enable BG2 (BG0 = 1, BG1 = 2, BG2 = 4, ...)
+func (d *DisplayMode3) Configure() {
+	// Use video mode 3 (in BG2, a 16bpp bitmap in VRAM) and Enable BG2
+	gba.DISP.DISPCNT.Set(gba.DISPCNT_BGMODE_3<<gba.DISPCNT_BGMODE_Pos |
+		gba.DISPCNT_SCREENDISPLAY_BG2_ENABLE<<gba.DISPCNT_SCREENDISPLAY_BG2_Pos)
 }
 
-func (d FramebufDisplay) Size() (x, y int16) {
+func (d *DisplayMode3) Size() (x, y int16) {
 	return 240, 160
 }
 
-func (d FramebufDisplay) SetPixel(x, y int16, c color.RGBA) {
-	d.port[y][x].Set(uint16(c.R)&0x1f | uint16(c.G)&0x1f<<5 | uint16(c.B)&0x1f<<10)
+func (d *DisplayMode3) SetPixel(x, y int16, c color.RGBA) {
+	d.port[y][x].Set((uint16(c.R) >> 3) | ((uint16(c.G) >> 3) << 5) | ((uint16(c.B) >> 3) << 10))
 }
 
-func (d FramebufDisplay) Display() error {
+func (d *DisplayMode3) Display() error {
 	// Nothing to do here.
 	return nil
 }

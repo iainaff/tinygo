@@ -1,10 +1,31 @@
-// +build avr,atmega
+//go:build avr && (atmega || atmega32u4)
 
 package runtime
 
 import (
 	"device/avr"
+	"machine"
 )
+
+func initUART() {
+	machine.InitSerial()
+}
+
+func putchar(c byte) {
+	machine.Serial.WriteByte(c)
+}
+
+func getchar() byte {
+	for machine.Serial.Buffered() == 0 {
+		Gosched()
+	}
+	v, _ := machine.Serial.ReadByte()
+	return v
+}
+
+func buffered() int {
+	return machine.Serial.Buffered()
+}
 
 // Sleep for a given period. The period is defined by the WDT peripheral, and is
 // on most chips (at least) 3 bits wide, in powers of two from 16ms to 2s

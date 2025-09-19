@@ -1,9 +1,11 @@
 
 MEMORY
 {
-    FLASH_TEXT (rw) : ORIGIN = 0, LENGTH = __flash_size - _bootloader_size
-    RAM (xrw)       : ORIGIN = 0, LENGTH = __ram_size
+    FLASH_TEXT (rw) : ORIGIN = 0,                      LENGTH = __flash_size - _bootloader_size
+    RAM (xrw)       : ORIGIN = 0x800000 + __ram_start, LENGTH = __ram_size
 }
+
+ENTRY(main)
 
 SECTIONS
 {
@@ -12,9 +14,11 @@ SECTIONS
         KEEP(*(.vectors))
         KEEP(*(.text.__vector_RESET))
         KEEP(*(.text.main)) /* main must follow the reset handler */
+        *(.text)
         *(.text.*)
-        *(.rodata)
-        *(.rodata.*)
+        *(.progmem)
+        *(.progmem.*)
+        . = ALIGN(16); /* needed with ld.lld for some reasoon */
     }
 
     .stack (NOLOAD) :
@@ -28,6 +32,8 @@ SECTIONS
     .data :
     {
         _sdata = .;        /* used by startup code */
+        *(.rodata)
+        *(.rodata.*)
         *(.data)
         *(.data*)
         _edata = .;        /* used by startup code */

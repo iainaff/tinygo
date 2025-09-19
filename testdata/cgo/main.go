@@ -1,15 +1,27 @@
 package main
 
 /*
+#include <stdio.h>
+#include <math.h>
 int fortytwo(void);
 #include "main.h"
+#include "test.h"
 int mul(int, int);
+#include <string.h>
+#cgo CFLAGS: -DSOME_CONSTANT=17
+#define someDefine -5 + 2 * 7
+bool someBool;
 */
 import "C"
 
+// int headerfunc(int a) { return a + 1; }
+// static int headerfunc_static(int a) { return a - 1; }
 import "C"
 
-import "unsafe"
+import (
+	"syscall"
+	"unsafe"
+)
 
 func main() {
 	println("fortytwo:", C.fortytwo())
@@ -24,6 +36,7 @@ func main() {
 	println("defined floats:", C.CONST_FLOAT, C.CONST_FLOAT2)
 	println("defined string:", C.CONST_STRING)
 	println("defined char:", C.CONST_CHAR)
+	println("defined expr:", C.someDefine)
 	var ptr C.intPointer
 	var n C.int = 15
 	ptr = C.intPointer(&n)
@@ -34,10 +47,23 @@ func main() {
 	println("callback 1:", C.doCallback(20, 30, cb))
 	cb = C.binop_t(C.mul)
 	println("callback 2:", C.doCallback(20, 30, cb))
+	genericCallbackCall[int]()
+
+	// variadic functions
+	println("variadic0:", C.variadic0())
+	println("variadic2:", C.variadic2(3, 5))
+
+	// functions in the header C snippet
+	println("headerfunc:", C.headerfunc(5))
+	println("static headerfunc:", C.headerfunc_static(5))
+	headerfunc_2()
 
 	// equivalent types
 	var goInt8 int8 = 5
 	var _ C.int8_t = goInt8
+
+	var _ bool = C.someBool
+	var _ C._Bool = C.someBool
 
 	// more globals
 	println("bool:", C.globalBool, C.globalBool2 == true)
@@ -58,8 +84,10 @@ func main() {
 	println("union:", C.int(unsafe.Sizeof(C.globalUnion)) == C.globalUnionSize)
 	C.unionSetShort(22)
 	println("union s:", *C.globalUnion.unionfield_s())
-	C.unionSetFloat(3.14)
-	println("union f:", *C.globalUnion.unionfield_f())
+	C.unionSetFloat(C.float(6.28))
+	println("union f (C.float):", *C.globalUnion.unionfield_f())
+	C.unionSetFloat(float32(3.14))
+	println("union f (float32):", *C.globalUnion.unionfield_f())
 	C.unionSetData(5, 8, 1)
 	data := C.globalUnion.unionfield_data()
 	println("union global data:", data[0], data[1], data[2])
@@ -109,6 +137,64 @@ func main() {
 	var _ C.option3_t = C.option3A
 	println("option 2A:", C.option2A)
 	println("option 3A:", C.option3A)
+
+	// anonymous structs and enums in multiple Go files
+	var _ C.teststruct
+	var _ C.testenum
+
+	// Check that enums are considered the same width in C and CGo.
+	println("enum width matches:", unsafe.Sizeof(C.option2_t(0)) == uintptr(C.smallEnumWidth))
+
+	// Check whether CFLAGS are correctly passed on to compiled C files.
+	println("CFLAGS value:", C.cflagsConstant)
+
+	// Check array-to-pointer decaying. This signature:
+	//   void arraydecay(int buf1[5], int buf2[3][8], int buf3[4][7][2]);
+	// decays to:
+	//   void arraydecay(int *buf1, int *buf2[8], int *buf3[7][2]);
+	C.arraydecay((*C.int)(nil), (*[8]C.int)(nil), (*[7][2]C.int)(nil))
+
+	// Test CGo builtins like C.CString.
+	cstr := C.CString("string passed to C")
+	println("cstr length:", C.strlen(cstr))
+	gostr := C.GoString(cstr)
+	println("C.CString:", gostr)
+	charBuf := C.GoBytes(unsafe.Pointer(&C.globalChars[0]), 4)
+	println("C.charBuf:", charBuf[0], charBuf[1], charBuf[2], charBuf[3])
+	binaryString := C.GoStringN(&C.globalChars[0], 4)
+	println("C.CStringN:", len(binaryString), binaryString[0], binaryString[1], binaryString[2], binaryString[3])
+
+	// Test whether those builtins also work with zero length data.
+	println("C.GoString(nil):", C.GoString(nil))
+	println("len(C.GoStringN(nil, 0)):", len(C.GoStringN(nil, 0)))
+	println("len(C.GoBytes(nil, 0)):", len(C.GoBytes(nil, 0)))
+	println("len(C.GoBytes(C.CBytes(nil),0)):", len(C.GoBytes(C.CBytes(nil), 0)))
+	println(`rountrip CBytes:`, C.GoString((*C.char)(C.CBytes([]byte("hello\000")))))
+
+	// Check that errno is returned from the second return value, and that it
+	// matches the errno value that was just set.
+	_, errno := C.set_errno(C.EINVAL)
+	println("EINVAL:", errno == syscall.EINVAL)
+	_, errno = C.set_errno(C.EAGAIN)
+	println("EAGAIN:", errno == syscall.EAGAIN)
+
+	// libc: test whether C functions work at all.
+	buf1 := []byte("foobar\x00")
+	buf2 := make([]byte, len(buf1))
+	C.strcpy((*C.char)(unsafe.Pointer(&buf2[0])), (*C.char)(unsafe.Pointer(&buf1[0])))
+	println("copied string:", string(buf2[:C.strlen((*C.char)(unsafe.Pointer(&buf2[0])))]))
+
+	// libc: test libm functions (normally bundled in libc)
+	println("CGo sqrt(3):", C.sqrt(3))
+	println("C   sqrt(3):", C.doSqrt(3))
+
+	// libc: test basic stdio functionality
+	putsBuf := []byte("line written using C puts\x00")
+	C.puts((*C.char)(unsafe.Pointer(&putsBuf[0])))
+
+	// libc: test whether printf works in C.
+	printfBuf := []byte("line written using C printf with value=%d\n\x00")
+	C.printf_single_int((*C.char)(unsafe.Pointer(&printfBuf[0])), -21)
 }
 
 func printUnion(union C.joined_t) C.joined_t {
@@ -132,4 +218,12 @@ func printBitfield(bitfield *C.bitfield_t) {
 	println("bitfield c:", bitfield.bitfield_c())
 	println("bitfield d:", bitfield.d)
 	println("bitfield e:", bitfield.e)
+}
+
+type Int interface {
+	int | uint
+}
+
+func genericCallbackCall[T Int]() {
+	println("callback inside generic function:", C.doCallback(20, 30, C.binop_t(C.add)))
 }

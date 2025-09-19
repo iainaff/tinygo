@@ -1,5 +1,5 @@
 // Package llvmutil contains utility functions used across multiple compiler
-// packages. For example, they may be used by both the compiler pacakge and
+// packages. For example, they may be used by both the compiler package and
 // transformation packages.
 //
 // Normally, utility packages are avoided. However, in this case, the utility
@@ -7,7 +7,13 @@
 // places would be a big risk if only one of them is updated.
 package llvmutil
 
-import "tinygo.org/x/go-llvm"
+import (
+	"encoding/binary"
+	"strconv"
+	"strings"
+
+	"tinygo.org/x/go-llvm"
+)
 
 // CreateEntryBlockAlloca creates a new alloca in the entry block, even though
 // the IR builder is located elsewhere. It assumes that the insert point is
@@ -26,19 +32,19 @@ func CreateEntryBlockAlloca(builder llvm.Builder, t llvm.Type, name string) llvm
 }
 
 // CreateTemporaryAlloca creates a new alloca in the entry block and adds
-// lifetime start infromation in the IR signalling that the alloca won't be used
+// lifetime start information in the IR signalling that the alloca won't be used
 // before this point.
 //
 // This is useful for creating temporary allocas for intrinsics. Don't forget to
 // end the lifetime using emitLifetimeEnd after you're done with it.
-func CreateTemporaryAlloca(builder llvm.Builder, mod llvm.Module, t llvm.Type, name string) (alloca, bitcast, size llvm.Value) {
+func CreateTemporaryAlloca(builder llvm.Builder, mod llvm.Module, t llvm.Type, name string) (alloca, size llvm.Value) {
 	ctx := t.Context()
 	targetData := llvm.NewTargetData(mod.DataLayout())
-	i8ptrType := llvm.PointerType(ctx.Int8Type(), 0)
+	defer targetData.Dispose()
 	alloca = CreateEntryBlockAlloca(builder, t, name)
-	bitcast = builder.CreateBitCast(alloca, i8ptrType, name+".bitcast")
 	size = llvm.ConstInt(ctx.Int64Type(), targetData.TypeAllocSize(t), false)
-	builder.CreateCall(getLifetimeStartFunc(mod), []llvm.Value{size, bitcast}, "")
+	fnType, fn := getLifetimeStartFunc(mod)
+	builder.CreateCall(fnType, fn, []llvm.Value{size, alloca}, "")
 	return
 }
 
@@ -46,19 +52,20 @@ func CreateTemporaryAlloca(builder llvm.Builder, mod llvm.Module, t llvm.Type, n
 func CreateInstructionAlloca(builder llvm.Builder, mod llvm.Module, t llvm.Type, inst llvm.Value, name string) llvm.Value {
 	ctx := mod.Context()
 	targetData := llvm.NewTargetData(mod.DataLayout())
-	i8ptrType := llvm.PointerType(ctx.Int8Type(), 0)
+	defer targetData.Dispose()
 
 	alloca := CreateEntryBlockAlloca(builder, t, name)
 	builder.SetInsertPointBefore(inst)
-	bitcast := builder.CreateBitCast(alloca, i8ptrType, name+".bitcast")
 	size := llvm.ConstInt(ctx.Int64Type(), targetData.TypeAllocSize(t), false)
-	builder.CreateCall(getLifetimeStartFunc(mod), []llvm.Value{size, bitcast}, "")
+	fnType, fn := getLifetimeStartFunc(mod)
+	builder.CreateCall(fnType, fn, []llvm.Value{size, alloca}, "")
 	if next := llvm.NextInstruction(inst); !next.IsNil() {
 		builder.SetInsertPointBefore(next)
 	} else {
 		builder.SetInsertPointAtEnd(inst.InstructionParent())
 	}
-	builder.CreateCall(getLifetimeEndFunc(mod), []llvm.Value{size, bitcast}, "")
+	fnType, fn = getLifetimeEndFunc(mod)
+	builder.CreateCall(fnType, fn, []llvm.Value{size, alloca}, "")
 	return alloca
 }
 
@@ -66,33 +73,36 @@ func CreateInstructionAlloca(builder llvm.Builder, mod llvm.Module, t llvm.Type,
 // llvm.lifetime.end intrinsic. It is commonly used together with
 // createTemporaryAlloca.
 func EmitLifetimeEnd(builder llvm.Builder, mod llvm.Module, ptr, size llvm.Value) {
-	builder.CreateCall(getLifetimeEndFunc(mod), []llvm.Value{size, ptr}, "")
+	fnType, fn := getLifetimeEndFunc(mod)
+	builder.CreateCall(fnType, fn, []llvm.Value{size, ptr}, "")
 }
 
 // getLifetimeStartFunc returns the llvm.lifetime.start intrinsic and creates it
 // first if it doesn't exist yet.
-func getLifetimeStartFunc(mod llvm.Module) llvm.Value {
-	fn := mod.NamedFunction("llvm.lifetime.start.p0i8")
+func getLifetimeStartFunc(mod llvm.Module) (llvm.Type, llvm.Value) {
+	fnName := "llvm.lifetime.start.p0"
+	fn := mod.NamedFunction(fnName)
 	ctx := mod.Context()
-	i8ptrType := llvm.PointerType(ctx.Int8Type(), 0)
+	ptrType := llvm.PointerType(ctx.Int8Type(), 0)
+	fnType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ctx.Int64Type(), ptrType}, false)
 	if fn.IsNil() {
-		fnType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ctx.Int64Type(), i8ptrType}, false)
-		fn = llvm.AddFunction(mod, "llvm.lifetime.start.p0i8", fnType)
+		fn = llvm.AddFunction(mod, fnName, fnType)
 	}
-	return fn
+	return fnType, fn
 }
 
 // getLifetimeEndFunc returns the llvm.lifetime.end intrinsic and creates it
 // first if it doesn't exist yet.
-func getLifetimeEndFunc(mod llvm.Module) llvm.Value {
-	fn := mod.NamedFunction("llvm.lifetime.end.p0i8")
+func getLifetimeEndFunc(mod llvm.Module) (llvm.Type, llvm.Value) {
+	fnName := "llvm.lifetime.end.p0"
+	fn := mod.NamedFunction(fnName)
 	ctx := mod.Context()
-	i8ptrType := llvm.PointerType(ctx.Int8Type(), 0)
+	ptrType := llvm.PointerType(ctx.Int8Type(), 0)
+	fnType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ctx.Int64Type(), ptrType}, false)
 	if fn.IsNil() {
-		fnType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ctx.Int64Type(), i8ptrType}, false)
-		fn = llvm.AddFunction(mod, "llvm.lifetime.end.p0i8", fnType)
+		fn = llvm.AddFunction(mod, fnName, fnType)
 	}
-	return fn
+	return fnType, fn
 }
 
 // SplitBasicBlock splits a LLVM basic block into two parts. All instructions
@@ -165,4 +175,55 @@ func SplitBasicBlock(builder llvm.Builder, afterInst llvm.Value, insertAfter llv
 	}
 
 	return newBlock
+}
+
+// AppendToGlobal appends the given values to a global array like llvm.used. The global might
+// not exist yet. The values can be any pointer type, they will be cast to i8*.
+func AppendToGlobal(mod llvm.Module, globalName string, values ...llvm.Value) {
+	// Read the existing values in the llvm.used array (if it exists).
+	var usedValues []llvm.Value
+	if used := mod.NamedGlobal(globalName); !used.IsNil() {
+		builder := mod.Context().NewBuilder()
+		defer builder.Dispose()
+		usedInitializer := used.Initializer()
+		num := usedInitializer.Type().ArrayLength()
+		for i := 0; i < num; i++ {
+			usedValues = append(usedValues, builder.CreateExtractValue(usedInitializer, i, ""))
+		}
+		used.EraseFromParentAsGlobal()
+	}
+
+	// Add the new values.
+	ptrType := llvm.PointerType(mod.Context().Int8Type(), 0)
+	for _, value := range values {
+		// Note: the bitcast is necessary to cast AVR function pointers to
+		// address space 0 pointer types.
+		usedValues = append(usedValues, llvm.ConstPointerCast(value, ptrType))
+	}
+
+	// Create a new array (with the old and new values).
+	usedInitializer := llvm.ConstArray(ptrType, usedValues)
+	used := llvm.AddGlobal(mod, usedInitializer.Type(), globalName)
+	used.SetInitializer(usedInitializer)
+	used.SetLinkage(llvm.AppendingLinkage)
+}
+
+// Version returns the LLVM major version.
+func Version() int {
+	majorStr := strings.Split(llvm.Version, ".")[0]
+	major, err := strconv.Atoi(majorStr)
+	if err != nil {
+		panic("unexpected error while parsing LLVM version: " + err.Error()) // should not happen
+	}
+	return major
+}
+
+// Return the byte order for the given target triple. Most targets are little
+// endian, but for example MIPS can be big-endian.
+func ByteOrder(target string) binary.ByteOrder {
+	if strings.HasPrefix(target, "mips-") {
+		return binary.BigEndian
+	} else {
+		return binary.LittleEndian
+	}
 }

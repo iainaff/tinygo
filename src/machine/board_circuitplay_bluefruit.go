@@ -1,8 +1,8 @@
-// +build circuitplay_bluefruit
+//go:build circuitplay_bluefruit
 
 package machine
 
-const HasLowFrequencyCrystal = true
+const HasLowFrequencyCrystal = false
 
 // GPIO Pins
 const (
@@ -38,6 +38,7 @@ const (
 const (
 	LED       = D13
 	NEOPIXELS = D8
+	WS2812    = D8
 
 	BUTTONA = D4
 	BUTTONB = D5
@@ -61,13 +62,34 @@ const (
 	SDA_PIN = P0_05 // I2C0 external
 	SCL_PIN = P0_04 // I2C0 external
 
-	SDA1_PIN = P0_00 // I2C1 internal
-	SCL1_PIN = P0_01 // I2C1 internal
+	SDA1_PIN = P1_10 // I2C1 internal
+	SCL1_PIN = P1_12 // I2C1 internal
 )
 
 // SPI pins (internal flash)
 const (
-	SPI0_SCK_PIN  = P0_19 // SCK
-	SPI0_MOSI_PIN = P0_21 // MOSI
-	SPI0_MISO_PIN = P0_23 // MISO
+	SPI0_SCK_PIN = P0_19 // SCK
+	SPI0_SDO_PIN = P0_21 // SDO
+	SPI0_SDI_PIN = P0_23 // SDI
+)
+
+// PDM pins
+const (
+	PDM_CLK_PIN = P0_17 // CLK
+	PDM_DIN_PIN = P0_16 // DIN
+)
+
+// USB CDC identifiers
+const (
+	usb_STRING_PRODUCT      = "Adafruit Circuit Playground Bluefruit"
+	usb_STRING_MANUFACTURER = "Adafruit"
+)
+
+var (
+	usb_VID uint16 = 0x239A
+	usb_PID uint16 = 0x8045
+)
+
+var (
+	DefaultUART = UART0
 )

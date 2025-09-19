@@ -1,21 +1,31 @@
 {
-	"llvm-target":   "wasm32--wasi",
-	"build-tags":    ["js", "wasm"],
+	"llvm-target":   "wasm32-unknown-wasi",
+	"cpu":           "generic",
+	"features":      "+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext,-multivalue,-reference-types",
+	"build-tags":    ["tinygo.wasm"],
 	"goos":          "js",
 	"goarch":        "wasm",
-	"compiler":      "clang",
 	"linker":        "wasm-ld",
+	"libc":          "wasi-libc",
+	"rtlib":         "compiler-rt",
+	"gc":            "precise",
+	"scheduler":     "asyncify",
+	"default-stack-size": 65536,
 	"cflags": [
-		"--target=wasm32--wasi",
-		"--sysroot={root}/lib/wasi-libc/sysroot",
-		"-Oz"
+		"-mbulk-memory",
+		"-mnontrapping-fptoint",
+		"-mno-multivalue",
+		"-mno-reference-types",
+		"-msign-ext"
 	],
 	"ldflags": [
-		"--allow-undefined",
-		"--no-threads",
+		"--allow-undefined-file={root}/targets/wasm-undefined.txt",
 		"--stack-first",
-		"--export-all",
-		"{root}/lib/wasi-libc/sysroot/lib/wasm32-wasi/libc.a"
+		"--no-demangle"
 	],
-	"emulator":      ["node", "targets/wasm_exec.js"]
+	"extra-files": [
+		"src/runtime/asm_tinygowasm.S",
+		"src/runtime/gc_boehm.c"
+	],
+	"emulator":      "node {root}/targets/wasm_exec.js {}"
 }

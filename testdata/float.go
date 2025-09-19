@@ -31,6 +31,20 @@ func main() {
 	var f4 float32 = -11.8
 	println(int32(f1), int32(f2), int32(f3), int32(f4))
 
+	// float -> int saturating behavior
+	var f5 float32 = -1
+	var f6 float32 = 256
+	var f7 float32 = -129
+	f8 := float32(^uint32(0))
+	f9 := float32(int32(-2147483648))
+	f10 := float32(int32(2147483647))
+	var inf float32 = 1
+	inf /= 0
+	var nan float32 = 0
+	nan /= 0
+	println(uint8(f5), uint8(f6), int8(f7), int8(f6), uint32(f8), int32(f9), int32(f10),
+		uint8(inf), uint8(-inf), int8(inf), int8(-inf), uint8(nan), int64(nan))
+
 	// int -> float
 	var i1 int32 = 53
 	var i2 int32 = -8
@@ -57,15 +71,17 @@ func main() {
 	println(complex64(c128))
 	println(complex128(c64))
 
-	// binops on complex numbers
-	c64 = 5+2i
-	println("complex64 add: ", c64 + -3+8i)
-	println("complex64 sub: ", c64 - -3+8i)
-	println("complex64 mul: ", c64 * -3+8i)
-	println("complex64 div: ", c64 / -3+8i)
-	c128 = -5+2i
-	println("complex128 add:", c128 + 2+6i)
-	println("complex128 sub:", c128 - 2+6i)
-	println("complex128 mul:", c128 * 2+6i)
-	println("complex128 div:", c128 / 2+6i)
+	// binops and negate on complex numbers
+	c64 = 5 + 2i
+	println("complex64 add: ", c64+-3+8i)
+	println("complex64 sub: ", c64 - -3 + 8i)
+	println("complex64 mul: ", c64*-3+8i)
+	println("complex64 div: ", c64/-3+8i)
+	println("complex64 neg: ", -c64)
+	c128 = -5 + 2i
+	println("complex128 add:", c128+2+6i)
+	println("complex128 sub:", c128-2+6i)
+	println("complex128 mul:", c128*2+6i)
+	println("complex128 div:", c128/2+6i)
+	println("complex128 neg:", -c128)
 }

@@ -1,10 +1,12 @@
 # TinyGo - Go compiler for small places
 
-[![CircleCI](https://circleci.com/gh/tinygo-org/tinygo/tree/dev.svg?style=svg)](https://circleci.com/gh/tinygo-org/tinygo/tree/dev) [![Build Status](https://dev.azure.com/tinygo/tinygo/_apis/build/status/tinygo-CI?branchName=dev)](https://dev.azure.com/tinygo/tinygo/_build/latest?definitionId=1&branchName=dev)
+[![Linux](https://github.com/tinygo-org/tinygo/actions/workflows/linux.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/linux.yml) [![macOS](https://github.com/tinygo-org/tinygo/actions/workflows/build-macos.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/build-macos.yml) [![Windows](https://github.com/tinygo-org/tinygo/actions/workflows/windows.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/windows.yml) [![Docker](https://github.com/tinygo-org/tinygo/actions/workflows/docker.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/docker.yml) [![Nix](https://github.com/tinygo-org/tinygo/actions/workflows/nix.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/nix.yml) [![CircleCI](https://circleci.com/gh/tinygo-org/tinygo/tree/dev.svg?style=svg)](https://circleci.com/gh/tinygo-org/tinygo/tree/dev)
 
-TinyGo is a Go compiler intended for use in small places such as microcontrollers, WebAssembly (Wasm), and command-line tools.
+TinyGo is a Go compiler intended for use in small places such as microcontrollers, WebAssembly (wasm/wasi), and command-line tools.
 
 It reuses libraries used by the [Go language tools](https://golang.org/pkg/go/) alongside [LLVM](http://llvm.org) to provide an alternative way to compile programs written in the Go programming language.
+
+## Embedded
 
 Here is an example program that blinks the built-in LED when run directly on any supported board with onboard LED:
 
@@ -35,45 +37,64 @@ The above program can be compiled and run without modification on an Arduino Uno
 tinygo flash -target arduino examples/blinky1
 ```
 
+## WebAssembly
+
+TinyGo is very useful for compiling programs both for use in browsers (WASM) as well as for use on servers and other edge devices (WASI).
+
+TinyGo programs can run in [Fastly Compute](https://www.fastly.com/documentation/guides/compute/go/), [Fermyon Spin](https://developer.fermyon.com/spin/go-components), [wazero](https://wazero.io/languages/tinygo/) and many other WebAssembly runtimes.
+
+Here is a small TinyGo program for use by a WASI host application:
+
+```go
+package main
+
+//go:wasmexport add
+func add(x, y uint32) uint32 {
+	return x + y
+}
+```
+
+This compiles the above TinyGo program for use on any WASI Preview 1 runtime:
+
+```shell
+tinygo build -buildmode=c-shared -o add.wasm -target=wasip1 add.go
+```
+
+You can also use the same syntax as Go 1.24+:
+
+```shell
+GOARCH=wasip1 GOOS=wasm tinygo build -buildmode=c-shared -o add.wasm add.go
+```
+
 ## Installation
 
 See the [getting started instructions](https://tinygo.org/getting-started/) for information on how to install TinyGo, as well as how to run the TinyGo compiler using our Docker container.
 
-## Supported boards/targets
+## Supported targets
 
-You can compile TinyGo programs for microcontrollers, WebAssembly and Linux.
+### Embedded
 
-The following 27 microcontroller boards are currently supported:
+You can compile TinyGo programs for over 94 different microcontroller boards.
 
-* [Adafruit Circuit Playground Bluefruit](https://www.adafruit.com/product/4333)
-* [Adafruit Circuit Playground Express](https://www.adafruit.com/product/3333)
-* [Adafruit Feather M0](https://www.adafruit.com/product/2772)
-* [Adafruit Feather M4](https://www.adafruit.com/product/3857)
-* [Adafruit ItsyBitsy M0](https://www.adafruit.com/product/3727)
-* [Adafruit ItsyBitsy M4](https://www.adafruit.com/product/3800)
-* [Adafruit Metro M4 Express Airlift](https://www.adafruit.com/product/4000)
-* [Adafruit PyBadge](https://www.adafruit.com/product/4200)
-* [Adafruit PyPortal](https://www.adafruit.com/product/4116)
-* [Adafruit Trinket M0](https://www.adafruit.com/product/3500)
-* [Arduino Nano](https://store.arduino.cc/arduino-nano)
-* [Arduino Nano33 IoT](https://store.arduino.cc/nano-33-iot)
-* [Arduino Uno](https://store.arduino.cc/arduino-uno-rev3)
-* [BBC micro:bit](https://microbit.org/)
-* [Digispark](http://digistump.com/products/1)
-* [Game Boy Advance](https://en.wikipedia.org/wiki/Game_Boy_Advance)
-* [Makerdiary nRF52840-MDK](https://wiki.makerdiary.com/nrf52840-mdk/)
-* [Nordic Semiconductor PCA10031](https://www.nordicsemi.com/eng/Products/nRF51-Dongle)
-* [Nordic Semiconductor PCA10040](https://www.nordicsemi.com/eng/Products/Bluetooth-low-energy/nRF52-DK)
-* [Nordic Semiconductor PCA10056](https://www.nordicsemi.com/Software-and-Tools/Development-Kits/nRF52840-DK)
-* [Phytec reel board](https://www.phytec.eu/product-eu/internet-of-things/reelboard/)
-* [PineTime DevKit](https://www.pine64.org/pinetime/)
-* [SiFIve HiFive1](https://www.sifive.com/boards/hifive1)
-* [ST Micro "Nucleo F103RB"](https://www.st.com/en/evaluation-tools/nucleo-f103rb.html)
-* [ST Micro STM32F103XX "Bluepill"](http://wiki.stm32duino.com/index.php?title=Blue_Pill)
-* [ST Micro STM32F407 "Discovery"](https://www.st.com/en/evaluation-tools/stm32f4discovery.html)
-* [X9 Pro smartwatch](https://github.com/curtpw/nRF5x-device-reverse-engineering/tree/master/X9-nrf52832-activity-tracker/)
+For more information, please see https://tinygo.org/docs/reference/microcontrollers/
 
-For more information, see [this list of boards](https://tinygo.org/microcontrollers/). Pull requests for additional support are welcome!
+### WebAssembly
+
+TinyGo programs can be compiled for both WASM and WASI targets.
+
+For more information, see https://tinygo.org/docs/guides/webassembly/
+
+### Operating Systems
+
+You can also compile programs for Linux, macOS, and Windows targets.
+
+For more information:
+
+- Linux https://tinygo.org/docs/guides/linux/
+
+- macOS https://tinygo.org/docs/guides/macos/
+
+- Windows https://tinygo.org/docs/guides/windows/
 
 ## Currently supported features:
 
@@ -98,7 +119,7 @@ should arrive fairly quickly (under 1 min): https://invite.slack.golangbridge.or
 
 Your contributions are welcome!
 
-Please take a look at our [CONTRIBUTING.md](./CONTRIBUTING.md) document for details.
+Please take a look at our [Contributing](https://tinygo.org/docs/guides/contributing/) page on our web site for details.
 
 ## Project Scope
 
@@ -112,7 +133,6 @@ Goals:
 
 Non-goals:
 
-* Using more than one core.
 * Be efficient while using zillions of goroutines. However, good goroutine support is certainly a goal.
 * Be as fast as `gc`. However, LLVM will probably be better at optimizing certain things so TinyGo might actually turn out to be faster for number crunching.
 * Be able to compile every Go program out there.
@@ -131,4 +151,6 @@ The original reasoning was: if [Python](https://micropython.org/) can run on mic
 
 This project is licensed under the BSD 3-clause license, just like the [Go project](https://golang.org/LICENSE) itself.
 
-Some code has been copied from the LLVM project and is therefore licensed under [a variant of the Apache 2.0 license](http://releases.llvm.org/9.0.0/LICENSE.TXT). This has been clearly indicated in the header of these files.
+Some code has been copied from the LLVM project and is therefore licensed under [a variant of the Apache 2.0 license](http://releases.llvm.org/11.0.0/LICENSE.TXT). This has been clearly indicated in the header of these files.
+
+Some code has been copied and/or ported from Paul Stoffregen's Teensy libraries and is therefore licensed under PJRC's license. This has been clearly indicated in the header of these files.

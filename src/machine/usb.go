@@ -1,605 +1,338 @@
-// +build sam
+//go:build sam || nrf52840 || rp2040 || rp2350
 
 package machine
 
 import (
+	"machine/usb"
+	"machine/usb/descriptor"
+
 	"errors"
-	"runtime/volatile"
 )
 
-const deviceDescriptorSize = 18
-
-// DeviceDescriptor implements the USB standard device descriptor.
-//
-// Table 9-8. Standard Device Descriptor
-// bLength, bDescriptorType, bcdUSB, bDeviceClass, bDeviceSubClass, bDeviceProtocol, bMaxPacketSize0,
-//    idVendor, idProduct, bcdDevice, iManufacturer, iProduct, iSerialNumber, bNumConfigurations */
-//
-type DeviceDescriptor struct {
-	bLength            uint8  // 18
-	bDescriptorType    uint8  // 1 USB_DEVICE_DESCRIPTOR_TYPE
-	bcdUSB             uint16 // 0x200
-	bDeviceClass       uint8
-	bDeviceSubClass    uint8
-	bDeviceProtocol    uint8
-	bMaxPacketSize0    uint8 // Packet 0
-	idVendor           uint16
-	idProduct          uint16
-	bcdDevice          uint16 // 0x100
-	iManufacturer      uint8
-	iProduct           uint8
-	iSerialNumber      uint8
-	bNumConfigurations uint8
-}
-
-// NewDeviceDescriptor returns a USB DeviceDescriptor.
-func NewDeviceDescriptor(class, subClass, proto, packetSize0 uint8, vid, pid, version uint16, im, ip, is, configs uint8) DeviceDescriptor {
-	return DeviceDescriptor{deviceDescriptorSize, 1, 0x200, class, subClass, proto, packetSize0, vid, pid, version, im, ip, is, configs}
-}
-
-// Bytes returns DeviceDescriptor data
-func (d DeviceDescriptor) Bytes() []byte {
-	b := make([]byte, deviceDescriptorSize)
-	b[0] = byte(d.bLength)
-	b[1] = byte(d.bDescriptorType)
-	b[2] = byte(d.bcdUSB)
-	b[3] = byte(d.bcdUSB >> 8)
-	b[4] = byte(d.bDeviceClass)
-	b[5] = byte(d.bDeviceSubClass)
-	b[6] = byte(d.bDeviceProtocol)
-	b[7] = byte(d.bMaxPacketSize0)
-	b[8] = byte(d.idVendor)
-	b[9] = byte(d.idVendor >> 8)
-	b[10] = byte(d.idProduct)
-	b[11] = byte(d.idProduct >> 8)
-	b[12] = byte(d.bcdDevice)
-	b[13] = byte(d.bcdDevice >> 8)
-	b[14] = byte(d.iManufacturer)
-	b[15] = byte(d.iProduct)
-	b[16] = byte(d.iSerialNumber)
-	b[17] = byte(d.bNumConfigurations)
-	return b
-}
-
-const configDescriptorSize = 9
-
-// ConfigDescriptor implements the standard USB configuration descriptor.
-//
-// Table 9-10. Standard Configuration Descriptor
-// bLength, bDescriptorType, wTotalLength, bNumInterfaces, bConfigurationValue, iConfiguration
-// bmAttributes, bMaxPower
-//
-type ConfigDescriptor struct {
-	bLength             uint8  // 9
-	bDescriptorType     uint8  // 2
-	wTotalLength        uint16 // total length
-	bNumInterfaces      uint8
-	bConfigurationValue uint8
-	iConfiguration      uint8
-	bmAttributes        uint8
-	bMaxPower           uint8
-}
-
-// NewConfigDescriptor returns a new USB ConfigDescriptor.
-func NewConfigDescriptor(totalLength uint16, interfaces uint8) ConfigDescriptor {
-	return ConfigDescriptor{configDescriptorSize, 2, totalLength, interfaces, 1, 0, usb_CONFIG_BUS_POWERED | usb_CONFIG_REMOTE_WAKEUP, 50}
-}
-
-// Bytes returns ConfigDescriptor data.
-func (d ConfigDescriptor) Bytes() []byte {
-	b := make([]byte, configDescriptorSize)
-	b[0] = byte(d.bLength)
-	b[1] = byte(d.bDescriptorType)
-	b[2] = byte(d.wTotalLength)
-	b[3] = byte(d.wTotalLength >> 8)
-	b[4] = byte(d.bNumInterfaces)
-	b[5] = byte(d.bConfigurationValue)
-	b[6] = byte(d.iConfiguration)
-	b[7] = byte(d.bmAttributes)
-	b[8] = byte(d.bMaxPower)
-	return b
-}
-
-const interfaceDescriptorSize = 9
-
-// InterfaceDescriptor implements the standard USB interface descriptor.
-//
-// Table 9-12. Standard Interface Descriptor
-// bLength, bDescriptorType, bInterfaceNumber, bAlternateSetting, bNumEndpoints, bInterfaceClass,
-// bInterfaceSubClass, bInterfaceProtocol, iInterface
-//
-type InterfaceDescriptor struct {
-	bLength            uint8 // 9
-	bDescriptorType    uint8 // 4
-	bInterfaceNumber   uint8
-	bAlternateSetting  uint8
-	bNumEndpoints      uint8
-	bInterfaceClass    uint8
-	bInterfaceSubClass uint8
-	bInterfaceProtocol uint8
-	iInterface         uint8
-}
-
-// NewInterfaceDescriptor returns a new USB InterfaceDescriptor.
-func NewInterfaceDescriptor(n, numEndpoints, class, subClass, protocol uint8) InterfaceDescriptor {
-	return InterfaceDescriptor{interfaceDescriptorSize, 4, n, 0, numEndpoints, class, subClass, protocol, 0}
-}
-
-// Bytes returns InterfaceDescriptor data.
-func (d InterfaceDescriptor) Bytes() []byte {
-	b := make([]byte, interfaceDescriptorSize)
-	b[0] = byte(d.bLength)
-	b[1] = byte(d.bDescriptorType)
-	b[2] = byte(d.bInterfaceNumber)
-	b[3] = byte(d.bAlternateSetting)
-	b[4] = byte(d.bNumEndpoints)
-	b[5] = byte(d.bInterfaceClass)
-	b[6] = byte(d.bInterfaceSubClass)
-	b[7] = byte(d.bInterfaceProtocol)
-	b[8] = byte(d.iInterface)
-	return b
-}
-
-const endpointDescriptorSize = 7
-
-// EndpointDescriptor implements the standard USB endpoint descriptor.
-//
-// Table 9-13. Standard Endpoint Descriptor
-// bLength, bDescriptorType, bEndpointAddress, bmAttributes, wMaxPacketSize, bInterval
-//
-type EndpointDescriptor struct {
-	bLength          uint8 // 7
-	bDescriptorType  uint8 // 5
-	bEndpointAddress uint8
-	bmAttributes     uint8
-	wMaxPacketSize   uint16
-	bInterval        uint8
-}
-
-// NewEndpointDescriptor returns a new USB EndpointDescriptor.
-func NewEndpointDescriptor(addr, attr uint8, packetSize uint16, interval uint8) EndpointDescriptor {
-	return EndpointDescriptor{endpointDescriptorSize, 5, addr, attr, packetSize, interval}
-}
-
-// Bytes returns EndpointDescriptor data.
-func (d EndpointDescriptor) Bytes() []byte {
-	b := make([]byte, endpointDescriptorSize)
-	b[0] = byte(d.bLength)
-	b[1] = byte(d.bDescriptorType)
-	b[2] = byte(d.bEndpointAddress)
-	b[3] = byte(d.bmAttributes)
-	b[4] = byte(d.wMaxPacketSize)
-	b[5] = byte(d.wMaxPacketSize >> 8)
-	b[6] = byte(d.bInterval)
-	return b
-}
-
-const iadDescriptorSize = 8
-
-// IADDescriptor is an Interface Association Descriptor, which is used
-// to bind 2 interfaces together in CDC composite device.
-//
-// Standard Interface Association Descriptor:
-// bLength, bDescriptorType, bFirstInterface, bInterfaceCount, bFunctionClass, bFunctionSubClass,
-// bFunctionProtocol, iFunction
-//
-type IADDescriptor struct {
-	bLength           uint8 // 8
-	bDescriptorType   uint8 // 11
-	bFirstInterface   uint8
-	bInterfaceCount   uint8
-	bFunctionClass    uint8
-	bFunctionSubClass uint8
-	bFunctionProtocol uint8
-	iFunction         uint8
-}
-
-// NewIADDescriptor returns a new USB IADDescriptor.
-func NewIADDescriptor(firstInterface, count, class, subClass, protocol uint8) IADDescriptor {
-	return IADDescriptor{iadDescriptorSize, 11, firstInterface, count, class, subClass, protocol, 0}
-}
-
-// Bytes returns IADDescriptor data.
-func (d IADDescriptor) Bytes() []byte {
-	b := make([]byte, iadDescriptorSize)
-	b[0] = byte(d.bLength)
-	b[1] = byte(d.bDescriptorType)
-	b[2] = byte(d.bFirstInterface)
-	b[3] = byte(d.bInterfaceCount)
-	b[4] = byte(d.bFunctionClass)
-	b[5] = byte(d.bFunctionSubClass)
-	b[6] = byte(d.bFunctionProtocol)
-	b[7] = byte(d.iFunction)
-	return b
-}
-
-const cdcCSInterfaceDescriptorSize = 5
-
-// CDCCSInterfaceDescriptor is a CDC CS interface descriptor.
-type CDCCSInterfaceDescriptor struct {
-	len     uint8 // 5
-	dtype   uint8 // 0x24
-	subtype uint8
-	d0      uint8
-	d1      uint8
-}
-
-// NewCDCCSInterfaceDescriptor returns a new USB CDCCSInterfaceDescriptor.
-func NewCDCCSInterfaceDescriptor(subtype, d0, d1 uint8) CDCCSInterfaceDescriptor {
-	return CDCCSInterfaceDescriptor{cdcCSInterfaceDescriptorSize, 0x24, subtype, d0, d1}
-}
-
-// Bytes returns CDCCSInterfaceDescriptor data.
-func (d CDCCSInterfaceDescriptor) Bytes() []byte {
-	b := make([]byte, cdcCSInterfaceDescriptorSize)
-	b[0] = byte(d.len)
-	b[1] = byte(d.dtype)
-	b[2] = byte(d.subtype)
-	b[3] = byte(d.d0)
-	b[4] = byte(d.d1)
-	return b
-}
-
-const cmFunctionalDescriptorSize = 5
-
-// CMFunctionalDescriptor is the functional descriptor general format.
-type CMFunctionalDescriptor struct {
-	bFunctionLength    uint8
-	bDescriptorType    uint8 // 0x24
-	bDescriptorSubtype uint8 // 1
-	bmCapabilities     uint8
-	bDataInterface     uint8
-}
-
-// NewCMFunctionalDescriptor returns a new USB CMFunctionalDescriptor.
-func NewCMFunctionalDescriptor(subtype, d0, d1 uint8) CMFunctionalDescriptor {
-	return CMFunctionalDescriptor{5, 0x24, subtype, d0, d1}
-}
-
-// Bytes returns the CMFunctionalDescriptor data.
-func (d CMFunctionalDescriptor) Bytes() []byte {
-	b := make([]byte, cmFunctionalDescriptorSize)
-	b[0] = byte(d.bFunctionLength)
-	b[1] = byte(d.bDescriptorType)
-	b[2] = byte(d.bDescriptorSubtype)
-	b[3] = byte(d.bmCapabilities)
-	b[4] = byte(d.bDescriptorSubtype)
-	return b
-}
-
-const acmFunctionalDescriptorSize = 4
-
-// ACMFunctionalDescriptor is a Abstract Control Model (ACM) USB descriptor.
-type ACMFunctionalDescriptor struct {
-	len            uint8
-	dtype          uint8 // 0x24
-	subtype        uint8 // 1
-	bmCapabilities uint8
-}
-
-// NewACMFunctionalDescriptor returns a new USB ACMFunctionalDescriptor.
-func NewACMFunctionalDescriptor(subtype, d0 uint8) ACMFunctionalDescriptor {
-	return ACMFunctionalDescriptor{4, 0x24, subtype, d0}
-}
-
-// Bytes returns the ACMFunctionalDescriptor data.
-func (d ACMFunctionalDescriptor) Bytes() []byte {
-	b := make([]byte, acmFunctionalDescriptorSize)
-	b[0] = byte(d.len)
-	b[1] = byte(d.dtype)
-	b[2] = byte(d.subtype)
-	b[3] = byte(d.bmCapabilities)
-	return b
-}
-
-// CDCDescriptor is the Communication Device Class (CDC) descriptor.
-type CDCDescriptor struct {
-	//	IAD
-	iad IADDescriptor // Only needed on compound device
-
-	//	Control
-	cif    InterfaceDescriptor
-	header CDCCSInterfaceDescriptor
-
-	// CDC control
-	controlManagement    ACMFunctionalDescriptor  // ACM
-	functionalDescriptor CDCCSInterfaceDescriptor // CDC_UNION
-	callManagement       CMFunctionalDescriptor   // Call Management
-	cifin                EndpointDescriptor
-
-	//	CDC Data
-	dif InterfaceDescriptor
-	in  EndpointDescriptor
-	out EndpointDescriptor
-}
-
-func NewCDCDescriptor(i IADDescriptor, c InterfaceDescriptor,
-	h CDCCSInterfaceDescriptor,
-	cm ACMFunctionalDescriptor,
-	fd CDCCSInterfaceDescriptor,
-	callm CMFunctionalDescriptor,
-	ci EndpointDescriptor,
-	di InterfaceDescriptor,
-	outp EndpointDescriptor,
-	inp EndpointDescriptor) CDCDescriptor {
-	return CDCDescriptor{iad: i,
-		cif:                  c,
-		header:               h,
-		controlManagement:    cm,
-		functionalDescriptor: fd,
-		callManagement:       callm,
-		cifin:                ci,
-		dif:                  di,
-		in:                   inp,
-		out:                  outp}
-}
-
-const cdcSize = iadDescriptorSize +
-	interfaceDescriptorSize +
-	cdcCSInterfaceDescriptorSize +
-	acmFunctionalDescriptorSize +
-	cdcCSInterfaceDescriptorSize +
-	cmFunctionalDescriptorSize +
-	endpointDescriptorSize +
-	interfaceDescriptorSize +
-	endpointDescriptorSize +
-	endpointDescriptorSize
-
-// Bytes returns CDCDescriptor data.
-func (d CDCDescriptor) Bytes() []byte {
-	var buf []byte
-	buf = append(buf, d.iad.Bytes()...)
-	buf = append(buf, d.cif.Bytes()...)
-	buf = append(buf, d.header.Bytes()...)
-	buf = append(buf, d.controlManagement.Bytes()...)
-	buf = append(buf, d.functionalDescriptor.Bytes()...)
-	buf = append(buf, d.callManagement.Bytes()...)
-	buf = append(buf, d.cifin.Bytes()...)
-	buf = append(buf, d.dif.Bytes()...)
-	buf = append(buf, d.out.Bytes()...)
-	buf = append(buf, d.in.Bytes()...)
-	return buf
-}
-
-// MSCDescriptor is not used yet.
-type MSCDescriptor struct {
-	msc InterfaceDescriptor
-	in  EndpointDescriptor
-	out EndpointDescriptor
-}
-
-type cdcLineInfo struct {
-	dwDTERate   uint32
-	bCharFormat uint8
-	bParityType uint8
-	bDataBits   uint8
-	lineState   uint8
+type USBDevice struct {
+	initcomplete         bool
+	InitEndpointComplete bool
 }
 
 var (
-	// TODO: allow setting these
-	usb_STRING_LANGUAGE     = [2]uint16{(3 << 8) | (2 + 2), 0x0409} // English
-	usb_STRING_PRODUCT      = "Arduino Zero"
-	usb_STRING_MANUFACTURER = "Arduino"
-
-	usb_VID uint16 = 0x2341
-	usb_PID uint16 = 0x004d
+	USBDev = &USBDevice{}
+	USBCDC Serialer
 )
 
-const (
-	usb_IMANUFACTURER = 1
-	usb_IPRODUCT      = 2
-	usb_ISERIAL       = 3
+type Serialer interface {
+	WriteByte(c byte) error
+	Write(data []byte) (n int, err error)
+	Configure(config UARTConfig) error
+	Buffered() int
+	ReadByte() (byte, error)
+	DTR() bool
+	RTS() bool
+}
 
-	usb_ENDPOINT_TYPE_CONTROL     = 0x00
-	usb_ENDPOINT_TYPE_ISOCHRONOUS = 0x01
-	usb_ENDPOINT_TYPE_BULK        = 0x02
-	usb_ENDPOINT_TYPE_INTERRUPT   = 0x03
+var usbDescriptor descriptor.Descriptor
 
-	usb_DEVICE_DESCRIPTOR_TYPE        = 1
-	usb_CONFIGURATION_DESCRIPTOR_TYPE = 2
-	usb_STRING_DESCRIPTOR_TYPE        = 3
-	usb_INTERFACE_DESCRIPTOR_TYPE     = 4
-	usb_ENDPOINT_DESCRIPTOR_TYPE      = 5
-	usb_DEVICE_QUALIFIER              = 6
-	usb_OTHER_SPEED_CONFIGURATION     = 7
+func usbVendorID() uint16 {
+	if usb.VendorID != 0 {
+		return usb.VendorID
+	}
 
-	usbEndpointOut = 0x00
-	usbEndpointIn  = 0x80
+	return usb_VID
+}
 
-	usbEndpointPacketSize = 64 // 64 for Full Speed, EPT size max is 1024
-	usb_EPT_NUM           = 7
+func usbProductID() uint16 {
+	if usb.ProductID != 0 {
+		return usb.ProductID
+	}
 
-	// standard requests
-	usb_GET_STATUS        = 0
-	usb_CLEAR_FEATURE     = 1
-	usb_SET_FEATURE       = 3
-	usb_SET_ADDRESS       = 5
-	usb_GET_DESCRIPTOR    = 6
-	usb_SET_DESCRIPTOR    = 7
-	usb_GET_CONFIGURATION = 8
-	usb_SET_CONFIGURATION = 9
-	usb_GET_INTERFACE     = 10
-	usb_SET_INTERFACE     = 11
+	return usb_PID
+}
 
-	usb_DEVICE_CLASS_COMMUNICATIONS  = 0x02
-	usb_DEVICE_CLASS_HUMAN_INTERFACE = 0x03
-	usb_DEVICE_CLASS_STORAGE         = 0x08
-	usb_DEVICE_CLASS_VENDOR_SPECIFIC = 0xFF
+func usbManufacturer() string {
+	if usb.Manufacturer != "" {
+		return usb.Manufacturer
+	}
 
-	usb_CONFIG_POWERED_MASK  = 0x40
-	usb_CONFIG_BUS_POWERED   = 0x80
-	usb_CONFIG_SELF_POWERED  = 0xC0
-	usb_CONFIG_REMOTE_WAKEUP = 0x20
+	return usb_STRING_MANUFACTURER
+}
 
-	// CDC
-	usb_CDC_ACM_INTERFACE  = 0 // CDC ACM
-	usb_CDC_DATA_INTERFACE = 1 // CDC Data
-	usb_CDC_FIRST_ENDPOINT = 1
-	usb_CDC_ENDPOINT_ACM   = 1
-	usb_CDC_ENDPOINT_OUT   = 2
-	usb_CDC_ENDPOINT_IN    = 3
+func usbProduct() string {
+	if usb.Product != "" {
+		return usb.Product
+	}
 
-	// bmRequestType
-	usb_REQUEST_HOSTTODEVICE = 0x00
-	usb_REQUEST_DEVICETOHOST = 0x80
-	usb_REQUEST_DIRECTION    = 0x80
+	return usb_STRING_PRODUCT
+}
 
-	usb_REQUEST_STANDARD = 0x00
-	usb_REQUEST_CLASS    = 0x20
-	usb_REQUEST_VENDOR   = 0x40
-	usb_REQUEST_TYPE     = 0x60
+func usbSerial() string {
+	if usb.Serial != "" {
+		return usb.Serial
+	}
+	return ""
+}
 
-	usb_REQUEST_DEVICE    = 0x00
-	usb_REQUEST_INTERFACE = 0x01
-	usb_REQUEST_ENDPOINT  = 0x02
-	usb_REQUEST_OTHER     = 0x03
-	usb_REQUEST_RECIPIENT = 0x1F
+// strToUTF16LEDescriptor converts a utf8 string into a string descriptor
+// note: the following code only converts ascii characters to UTF16LE. In order
+// to do a "proper" conversion, we would need to pull in the 'unicode/utf16'
+// package, which at the time this was written added 512 bytes to the compiled
+// binary.
+func strToUTF16LEDescriptor(in string, out []byte) {
+	out[0] = byte(len(out))
+	out[1] = descriptor.TypeString
+	for i, rune := range in {
+		out[(i<<1)+2] = byte(rune)
+		out[(i<<1)+3] = 0
+	}
+	return
+}
 
-	usb_REQUEST_DEVICETOHOST_CLASS_INTERFACE    = (usb_REQUEST_DEVICETOHOST | usb_REQUEST_CLASS | usb_REQUEST_INTERFACE)
-	usb_REQUEST_HOSTTODEVICE_CLASS_INTERFACE    = (usb_REQUEST_HOSTTODEVICE | usb_REQUEST_CLASS | usb_REQUEST_INTERFACE)
-	usb_REQUEST_DEVICETOHOST_STANDARD_INTERFACE = (usb_REQUEST_DEVICETOHOST | usb_REQUEST_STANDARD | usb_REQUEST_INTERFACE)
+const cdcLineInfoSize = 7
 
-	// CDC Class requests
-	usb_CDC_SET_LINE_CODING        = 0x20
-	usb_CDC_GET_LINE_CODING        = 0x21
-	usb_CDC_SET_CONTROL_LINE_STATE = 0x22
-	usb_CDC_SEND_BREAK             = 0x23
-
-	usb_CDC_V1_10                         = 0x0110
-	usb_CDC_COMMUNICATION_INTERFACE_CLASS = 0x02
-
-	usb_CDC_CALL_MANAGEMENT             = 0x01
-	usb_CDC_ABSTRACT_CONTROL_MODEL      = 0x02
-	usb_CDC_HEADER                      = 0x00
-	usb_CDC_ABSTRACT_CONTROL_MANAGEMENT = 0x02
-	usb_CDC_UNION                       = 0x06
-	usb_CDC_CS_INTERFACE                = 0x24
-	usb_CDC_CS_ENDPOINT                 = 0x25
-	usb_CDC_DATA_INTERFACE_CLASS        = 0x0A
-
-	usb_CDC_LINESTATE_DTR = 0x01
-	usb_CDC_LINESTATE_RTS = 0x02
+var (
+	ErrUSBReadTimeout  = errors.New("USB read timeout")
+	ErrUSBBytesRead    = errors.New("USB invalid number of bytes read")
+	ErrUSBBytesWritten = errors.New("USB invalid number of bytes written")
 )
 
-// usbDeviceDescBank is the USB device endpoint descriptor.
-// typedef struct {
-// 	__IO USB_DEVICE_ADDR_Type      ADDR;        /**< \brief Offset: 0x000 (R/W 32) DEVICE_DESC_BANK Endpoint Bank, Adress of Data Buffer */
-// 	__IO USB_DEVICE_PCKSIZE_Type   PCKSIZE;     /**< \brief Offset: 0x004 (R/W 32) DEVICE_DESC_BANK Endpoint Bank, Packet Size */
-// 	__IO USB_DEVICE_EXTREG_Type    EXTREG;      /**< \brief Offset: 0x008 (R/W 16) DEVICE_DESC_BANK Endpoint Bank, Extended */
-// 	__IO USB_DEVICE_STATUS_BK_Type STATUS_BK;   /**< \brief Offset: 0x00A (R/W  8) DEVICE_DESC_BANK Enpoint Bank, Status of Bank */
-// 		 RoReg8                    Reserved1[0x5];
-//   } UsbDeviceDescBank;
-type usbDeviceDescBank struct {
-	ADDR      volatile.Register32
-	PCKSIZE   volatile.Register32
-	EXTREG    volatile.Register16
-	STATUS_BK volatile.Register8
-	_reserved [5]volatile.Register8
-}
+var (
+	usbEndpointDescriptors [NumberOfUSBEndpoints]descriptor.Device
 
-type usbDeviceDescriptor struct {
-	DeviceDescBank [2]usbDeviceDescBank
-}
+	isEndpointHalt        = false
+	isRemoteWakeUpEnabled = false
 
-// typedef struct {
-// 	union {
-// 		uint8_t bmRequestType;
-// 		struct {
-// 			uint8_t direction : 5;
-// 			uint8_t type : 2;
-// 			uint8_t transferDirection : 1;
-// 		};
-// 	};
-// 	uint8_t bRequest;
-// 	uint8_t wValueL;
-// 	uint8_t wValueH;
-// 	uint16_t wIndex;
-// 	uint16_t wLength;
-// } USBSetup;
-type usbSetup struct {
-	bmRequestType uint8
-	bRequest      uint8
-	wValueL       uint8
-	wValueH       uint8
-	wIndex        uint16
-	wLength       uint16
-}
+	usbConfiguration uint8
+	usbSetInterface  uint8
+)
 
-func newUSBSetup(data []byte) usbSetup {
-	u := usbSetup{}
-	u.bmRequestType = uint8(data[0])
-	u.bRequest = uint8(data[1])
-	u.wValueL = uint8(data[2])
-	u.wValueH = uint8(data[3])
-	u.wIndex = uint16(data[4]) | uint16(data[5]<<8)
-	u.wLength = uint16(data[6]) | uint16(data[7]<<8)
-	return u
-}
+//go:align 4
+var udd_ep_control_cache_buffer [256]uint8
 
-// USBCDC is the serial interface that works over the USB port.
-// To implement the USBCDC interface for a board, you must declare a concrete type as follows:
-//
-// 		type USBCDC struct {
-// 			Buffer *RingBuffer
-// 		}
-//
-// You can also add additional members to this struct depending on your implementation,
-// but the *RingBuffer is required.
-// When you are declaring the USBCDC for your board, make sure that you also declare the
-// RingBuffer using the NewRingBuffer() function:
-//
-//		USBCDC{Buffer: NewRingBuffer()}
-//
+//go:align 4
+var udd_ep_in_cache_buffer [NumberOfUSBEndpoints][64]uint8
 
-// Read from the RX buffer.
-func (usbcdc USBCDC) Read(data []byte) (n int, err error) {
-	// check if RX buffer is empty
-	size := usbcdc.Buffered()
-	if size == 0 {
-		return 0, nil
+//go:align 4
+var udd_ep_out_cache_buffer [NumberOfUSBEndpoints][64]uint8
+
+// usb_trans_buffer max size is 255 since that is max size
+// for a descriptor (bLength is 1 byte), and the biggest use
+// for this buffer is to transmit string descriptors.  If
+// this buffer is used for new purposes in future the length
+// must be revisited.
+var usb_trans_buffer [255]uint8
+
+var (
+	usbTxHandler    [NumberOfUSBEndpoints]func()
+	usbRxHandler    [NumberOfUSBEndpoints]func([]byte) bool
+	usbSetupHandler [usb.NumberOfInterfaces]func(usb.Setup) bool
+	usbStallHandler [NumberOfUSBEndpoints]func(usb.Setup) bool
+)
+
+// sendDescriptor creates and sends the various USB descriptor types that
+// can be requested by the host.
+func sendDescriptor(setup usb.Setup) {
+	switch setup.WValueH {
+	case descriptor.TypeConfiguration:
+		sendUSBPacket(0, usbDescriptor.Configuration, setup.WLength)
+		return
+	case descriptor.TypeDevice:
+		usbDescriptor.Configure(usbVendorID(), usbProductID())
+		sendUSBPacket(0, usbDescriptor.Device, setup.WLength)
+		return
+
+	case descriptor.TypeString:
+		switch setup.WValueL {
+		case 0:
+			usb_trans_buffer[0] = 0x04
+			usb_trans_buffer[1] = 0x03
+			usb_trans_buffer[2] = 0x09
+			usb_trans_buffer[3] = 0x04
+			sendUSBPacket(0, usb_trans_buffer[:4], setup.WLength)
+
+		case usb.IPRODUCT:
+			b := usb_trans_buffer[:(len(usbProduct())<<1)+2]
+			strToUTF16LEDescriptor(usbProduct(), b)
+			sendUSBPacket(0, b, setup.WLength)
+
+		case usb.IMANUFACTURER:
+			b := usb_trans_buffer[:(len(usbManufacturer())<<1)+2]
+			strToUTF16LEDescriptor(usbManufacturer(), b)
+			sendUSBPacket(0, b, setup.WLength)
+
+		case usb.ISERIAL:
+			sz := len(usbSerial())
+			if sz == 0 {
+				SendZlp()
+			} else {
+				b := usb_trans_buffer[:(sz<<1)+2]
+				strToUTF16LEDescriptor(usbSerial(), b)
+				sendUSBPacket(0, b, setup.WLength)
+			}
+		}
+		return
+	case descriptor.TypeHIDReport:
+		if h, ok := usbDescriptor.HID[setup.WIndex]; ok {
+			sendUSBPacket(0, h, setup.WLength)
+			return
+		}
+	case descriptor.TypeDeviceQualifier:
+		// skip
+	default:
 	}
 
-	// Make sure we do not read more from buffer than the data slice can hold.
-	if len(data) < size {
-		size = len(data)
-	}
-
-	// only read number of bytes used from buffer
-	for i := 0; i < size; i++ {
-		v, _ := usbcdc.ReadByte()
-		data[i] = v
-	}
-
-	return size, nil
+	// do not know how to handle this message, so return zero
+	SendZlp()
+	return
 }
 
-// Write data to the USBCDC.
-func (usbcdc USBCDC) Write(data []byte) (n int, err error) {
-	for _, v := range data {
-		usbcdc.WriteByte(v)
+func handleStandardSetup(setup usb.Setup) bool {
+	switch setup.BRequest {
+	case usb.GET_STATUS:
+		usb_trans_buffer[0] = 0
+		usb_trans_buffer[1] = 0
+
+		if setup.BmRequestType != 0 { // endpoint
+			if isEndpointHalt {
+				usb_trans_buffer[0] = 1
+			}
+		}
+
+		sendUSBPacket(0, usb_trans_buffer[:2], setup.WLength)
+		return true
+
+	case usb.CLEAR_FEATURE:
+		if setup.WValueL == 1 { // DEVICEREMOTEWAKEUP
+			isRemoteWakeUpEnabled = false
+		} else if setup.WValueL == 0 { // ENDPOINTHALT
+			if idx := setup.WIndex & 0x7F; idx < NumberOfUSBEndpoints && usbStallHandler[idx] != nil {
+				// Host has requested to clear an endpoint stall. If the request is addressed to
+				// an endpoint with a configured StallHandler, forward the message on.
+				// The 0x7F mask is used to clear the direction bit from the endpoint number
+				return usbStallHandler[idx](setup)
+			}
+			isEndpointHalt = false
+		}
+		SendZlp()
+		return true
+
+	case usb.SET_FEATURE:
+		if setup.WValueL == 1 { // DEVICEREMOTEWAKEUP
+			isRemoteWakeUpEnabled = true
+		} else if setup.WValueL == 0 { // ENDPOINTHALT
+			if idx := setup.WIndex & 0x7F; idx < NumberOfUSBEndpoints && usbStallHandler[idx] != nil {
+				// Host has requested to stall an endpoint. If the request is addressed to
+				// an endpoint with a configured StallHandler, forward the message on.
+				// The 0x7F mask is used to clear the direction bit from the endpoint number
+				return usbStallHandler[idx](setup)
+			}
+			isEndpointHalt = true
+		}
+		SendZlp()
+		return true
+
+	case usb.SET_ADDRESS:
+		return handleUSBSetAddress(setup)
+
+	case usb.GET_DESCRIPTOR:
+		sendDescriptor(setup)
+		return true
+
+	case usb.SET_DESCRIPTOR:
+		return false
+
+	case usb.GET_CONFIGURATION:
+		usb_trans_buffer[0] = usbConfiguration
+		sendUSBPacket(0, usb_trans_buffer[:1], setup.WLength)
+		return true
+
+	case usb.SET_CONFIGURATION:
+		if setup.BmRequestType&usb.REQUEST_RECIPIENT == usb.REQUEST_DEVICE {
+			for i := 1; i < len(endPoints); i++ {
+				initEndpoint(uint32(i), endPoints[i])
+			}
+
+			usbConfiguration = setup.WValueL
+			USBDev.InitEndpointComplete = true
+
+			SendZlp()
+			return true
+		} else {
+			return false
+		}
+
+	case usb.GET_INTERFACE:
+		usb_trans_buffer[0] = usbSetInterface
+		sendUSBPacket(0, usb_trans_buffer[:1], setup.WLength)
+		return true
+
+	case usb.SET_INTERFACE:
+		usbSetInterface = setup.WValueL
+
+		SendZlp()
+		return true
+
+	default:
+		return true
 	}
-	return len(data), nil
 }
 
-// ReadByte reads a single byte from the RX buffer.
-// If there is no data in the buffer, returns an error.
-func (usbcdc USBCDC) ReadByte() (byte, error) {
-	// check if RX buffer is empty
-	buf, ok := usbcdc.Buffer.Get()
-	if !ok {
-		return 0, errors.New("Buffer empty")
+func EnableCDC(txHandler func(), rxHandler func([]byte), setupHandler func(usb.Setup) bool) {
+	if len(usbDescriptor.Device) == 0 {
+		usbDescriptor = descriptor.CDC
 	}
-	return buf, nil
+	// Initialization of endpoints is required even for non-CDC
+	ConfigureUSBEndpoint(usbDescriptor,
+		[]usb.EndpointConfig{
+			{
+				Index: usb.CDC_ENDPOINT_ACM,
+				IsIn:  true,
+				Type:  usb.ENDPOINT_TYPE_INTERRUPT,
+			},
+			{
+				Index:     usb.CDC_ENDPOINT_OUT,
+				IsIn:      false,
+				Type:      usb.ENDPOINT_TYPE_BULK,
+				RxHandler: rxHandler,
+			},
+			{
+				Index:     usb.CDC_ENDPOINT_IN,
+				IsIn:      true,
+				Type:      usb.ENDPOINT_TYPE_BULK,
+				TxHandler: txHandler,
+			},
+		},
+		[]usb.SetupConfig{
+			{
+				Index:   usb.CDC_ACM_INTERFACE,
+				Handler: setupHandler,
+			},
+		})
 }
 
-// Buffered returns the number of bytes currently stored in the RX buffer.
-func (usbcdc USBCDC) Buffered() int {
-	return int(usbcdc.Buffer.Used())
-}
+func ConfigureUSBEndpoint(desc descriptor.Descriptor, epSettings []usb.EndpointConfig, setup []usb.SetupConfig) {
+	usbDescriptor = desc
 
-// Receive handles adding data to the UART's data buffer.
-// Usually called by the IRQ handler for a machine.
-func (usbcdc USBCDC) Receive(data byte) {
-	usbcdc.Buffer.Put(data)
+	for _, ep := range epSettings {
+		if ep.IsIn {
+			endPoints[ep.Index] = uint32(ep.Type | usb.EndpointIn)
+			if ep.TxHandler != nil {
+				usbTxHandler[ep.Index] = ep.TxHandler
+			}
+		} else {
+			endPoints[ep.Index] = uint32(ep.Type | usb.EndpointOut)
+			if ep.RxHandler != nil {
+				usbRxHandler[ep.Index] = func(b []byte) bool {
+					ep.RxHandler(b)
+					return true
+				}
+			} else if ep.DelayRxHandler != nil {
+				usbRxHandler[ep.Index] = ep.DelayRxHandler
+			}
+		}
+		if ep.StallHandler != nil {
+			usbStallHandler[ep.Index] = ep.StallHandler
+		}
+	}
+
+	for _, s := range setup {
+		usbSetupHandler[s.Index] = s.Handler
+	}
 }

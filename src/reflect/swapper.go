@@ -1,5 +1,7 @@
 package reflect
 
+import "internal/reflectlite"
+
 func Swapper(slice interface{}) func(i, j int) {
-	panic("unimplemented: reflect.Swapper")
+	return reflectlite.Swapper(slice)
 }

@@ -1,4 +1,4 @@
-// +build hifive1b
+//go:build hifive1b
 
 package machine
 

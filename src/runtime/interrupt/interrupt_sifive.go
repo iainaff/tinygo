@@ -1,4 +1,4 @@
-// +build sifive
+//go:build sifive
 
 package interrupt
 

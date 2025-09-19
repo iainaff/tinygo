@@ -3,31 +3,30 @@ package builder
 import (
 	"bytes"
 	"debug/elf"
+	"debug/macho"
+	"debug/pe"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
 
+	wasm "github.com/aykevl/go-wasm"
 	"github.com/blakesmith/ar"
 )
 
-// makeArchive creates an arcive for static linking from a list of object files
+// makeArchive creates an archive for static linking from a list of object files
 // given as a parameter. It is equivalent to the following command:
 //
-//     ar -rcs <archivePath> <objs...>
-func makeArchive(archivePath string, objs []string) error {
+//	ar -rcs <archivePath> <objs...>
+func makeArchive(arfile *os.File, objs []string) error {
 	// Open the archive file.
-	arfile, err := os.Create(archivePath)
-	if err != nil {
-		return err
-	}
-	defer arfile.Close()
 	arwriter := ar.NewWriter(arfile)
-	err = arwriter.WriteGlobalHeader()
+	err := arwriter.WriteGlobalHeader()
 	if err != nil {
-		return &os.PathError{"write ar header", archivePath, err}
+		return &os.PathError{Op: "write ar header", Path: arfile.Name(), Err: err}
 	}
 
 	// Open all object files and read the symbols for the symbol table.
@@ -35,43 +34,96 @@ func makeArchive(archivePath string, objs []string) error {
 		name      string // symbol name
 		fileIndex int    // index into objfiles
 	}{}
-	objfiles := make([]struct {
-		file          *os.File
-		archiveOffset int32
-	}, len(objs))
+	archiveOffsets := make([]int32, len(objs))
 	for i, objpath := range objs {
 		objfile, err := os.Open(objpath)
 		if err != nil {
 			return err
 		}
-		objfiles[i].file = objfile
 
 		// Read the symbols and add them to the symbol table.
-		dbg, err := elf.NewFile(objfile)
-		if err != nil {
-			return err
-		}
-		symbols, err := dbg.Symbols()
-		if err != nil {
-			return err
-		}
-		for _, symbol := range symbols {
-			bind := elf.ST_BIND(symbol.Info)
-			if bind != elf.STB_GLOBAL && bind != elf.STB_WEAK {
-				// Don't include local symbols (STB_LOCAL).
-				continue
+		if dbg, err := elf.NewFile(objfile); err == nil {
+			symbols, err := dbg.Symbols()
+			if err != nil {
+				return err
 			}
-			if elf.ST_TYPE(symbol.Info) != elf.STT_FUNC {
-				// Not a function.
-				// TODO: perhaps globals variables should also be included?
-				continue
+			for _, symbol := range symbols {
+				bind := elf.ST_BIND(symbol.Info)
+				if bind != elf.STB_GLOBAL && bind != elf.STB_WEAK {
+					// Don't include local symbols (STB_LOCAL).
+					continue
+				}
+				if elf.ST_TYPE(symbol.Info) != elf.STT_FUNC && elf.ST_TYPE(symbol.Info) != elf.STT_OBJECT {
+					// Not a function.
+					continue
+				}
+				// Include in archive.
+				symbolTable = append(symbolTable, struct {
+					name      string
+					fileIndex int
+				}{symbol.Name, i})
 			}
-			// Include in archive.
-			symbolTable = append(symbolTable, struct {
-				name      string
-				fileIndex int
-			}{symbol.Name, i})
+		} else if dbg, err := macho.NewFile(objfile); err == nil {
+			for _, symbol := range dbg.Symtab.Syms {
+				// See mach-o/nlist.h
+				if symbol.Type&0x0e != 0xe { // (symbol.Type & N_TYPE) != N_SECT
+					continue // undefined symbol
+				}
+				if symbol.Type&0x01 == 0 { // (symbol.Type & N_EXT) == 0
+					continue // internal symbol (static, etc)
+				}
+				symbolTable = append(symbolTable, struct {
+					name      string
+					fileIndex int
+				}{symbol.Name, i})
+			}
+		} else if dbg, err := pe.NewFile(objfile); err == nil {
+			for _, symbol := range dbg.Symbols {
+				if symbol.StorageClass != 2 {
+					continue
+				}
+				if symbol.SectionNumber == 0 {
+					continue
+				}
+				symbolTable = append(symbolTable, struct {
+					name      string
+					fileIndex int
+				}{symbol.Name, i})
+			}
+		} else if dbg, err := wasm.Parse(objfile); err == nil {
+			for _, s := range dbg.Sections {
+				switch section := s.(type) {
+				case *wasm.SectionLinking:
+					for _, symbol := range section.Symbols {
+						if symbol.Flags&wasm.LinkingSymbolFlagUndefined != 0 {
+							// Don't list undefined functions.
+							continue
+						}
+						if symbol.Flags&wasm.LinkingSymbolFlagBindingLocal != 0 {
+							// Don't include local symbols.
+							continue
+						}
+						if symbol.Kind != wasm.LinkingSymbolKindFunction && symbol.Kind != wasm.LinkingSymbolKindData {
+							// Link functions and data symbols.
+							// Some data symbols need to be included, such as
+							// __log_data.
+							continue
+						}
+						// Include in the archive.
+						symbolTable = append(symbolTable, struct {
+							name      string
+							fileIndex int
+						}{symbol.Name, i})
+					}
+				}
+			}
+		} else {
+			return fmt.Errorf("failed to open file %s as WASM, ELF or PE/COFF: %w", objpath, err)
 		}
+
+		// Close file, to avoid issues with too many open files (especially on
+		// MacOS X).
+		objfile.Close()
 	}
 
 	// Create the symbol table buffer.
@@ -113,7 +165,7 @@ func makeArchive(archivePath string, objs []string) error {
 	}
 
 	// Keep track of the start of the symbol table.
-	symbolTableStart, err := arfile.Seek(0, os.SEEK_CUR)
+	symbolTableStart, err := arfile.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return err
 	}
@@ -125,25 +177,32 @@ func makeArchive(archivePath string, objs []string) error {
 	}
 
 	// Add all object files to the archive.
-	for i, objfile := range objfiles {
+	var copyBuf bytes.Buffer
+	for i, objpath := range objs {
+		objfile, err := os.Open(objpath)
+		if err != nil {
+			return err
+		}
+		defer objfile.Close()
+
 		// Store the start index, for when we'll update the symbol table with
 		// the correct file start indices.
-		offset, err := arfile.Seek(0, os.SEEK_CUR)
+		offset, err := arfile.Seek(0, io.SeekCurrent)
 		if err != nil {
 			return err
 		}
 		if int64(int32(offset)) != offset {
-			return errors.New("large archives (4GB+) not supported: " + archivePath)
+			return errors.New("large archives (4GB+) not supported: " + arfile.Name())
 		}
-		objfiles[i].archiveOffset = int32(offset)
+		archiveOffsets[i] = int32(offset)
 
 		// Write the file header.
-		st, err := objfile.file.Stat()
+		st, err := objfile.Stat()
 		if err != nil {
 			return err
 		}
 		err = arwriter.WriteHeader(&ar.Header{
-			Name:    filepath.Base(objfile.file.Name()),
+			Name:    filepath.Base(objfile.Name()),
 			ModTime: time.Unix(0, 0),
 			Uid:     0,
 			Gid:     0,
@@ -155,22 +214,30 @@ func makeArchive(archivePath string, objs []string) error {
 		}
 
 		// Copy the file contents into the archive.
-		n, err := io.Copy(arwriter, objfile.file)
+		// First load all contents into a buffer, then write it all in one go to
+		// the archive file. This is a bit complicated, but is necessary because
+		// io.Copy can't deal with files that are of an odd size.
+		copyBuf.Reset()
+		n, err := io.Copy(&copyBuf, objfile)
 		if err != nil {
-			return err
+			return fmt.Errorf("could not copy object file into ar file: %w", err)
 		}
 		if n != st.Size() {
-			return errors.New("file modified during ar creation: " + archivePath)
+			return errors.New("file modified during ar creation: " + arfile.Name())
+		}
+		_, err = arwriter.Write(copyBuf.Bytes())
+		if err != nil {
+			return fmt.Errorf("could not copy object file into ar file: %w", err)
 		}
 
 		// File is not needed anymore.
-		objfile.file.Close()
+		objfile.Close()
 	}
 
 	// Create symbol indices.
 	indicesBuf := &bytes.Buffer{}
 	for _, sym := range symbolTable {
-		err = binary.Write(indicesBuf, binary.BigEndian, objfiles[sym.fileIndex].archiveOffset)
+		err = binary.Write(indicesBuf, binary.BigEndian, archiveOffsets[sym.fileIndex])
 		if err != nil {
 			return err
 		}

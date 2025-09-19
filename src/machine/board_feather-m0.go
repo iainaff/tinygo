@@ -1,14 +1,9 @@
-// +build sam,atsamd21,feather_m0
+//go:build sam && atsamd21 && feather_m0
 
 package machine
 
-import (
-	"device/sam"
-	"runtime/interrupt"
-)
-
 // used to reset into bootloader
-const RESET_MAGIC_VALUE = 0xf01669ef
+const resetMagicValue = 0xf01669ef
 
 // GPIO Pins
 const (
@@ -42,7 +37,7 @@ const (
 	LED = D13
 )
 
-// UART0 aka USBCDC pins
+// USBCDC pins
 const (
 	USBCDC_DM_PIN = PA24
 	USBCDC_DP_PIN = PA25
@@ -55,17 +50,7 @@ const (
 )
 
 // UART1 on the Feather M0.
-var (
-	UART1 = UART{
-		Buffer: NewRingBuffer(),
-		Bus:    sam.SERCOM1_USART,
-		SERCOM: 1,
-	}
-)
-
-func init() {
-	UART1.Interrupt = interrupt.New(sam.IRQ_SERCOM1, UART1.handleInterrupt)
-}
+var UART1 = &sercomUSART1
 
 // I2C pins
 const (
@@ -75,30 +60,38 @@ const (
 
 // I2C on the Feather M0.
 var (
-	I2C0 = I2C{
-		Bus:    sam.SERCOM3_I2CM,
-		SERCOM: 3,
-	}
+	I2C0 = sercomI2CM3
 )
 
 // SPI pins
 const (
-	SPI0_SCK_PIN  = PB11 // SCK: SERCOM4/PAD[3]
-	SPI0_MOSI_PIN = PB10 // MOSI: SERCOM4/PAD[2]
-	SPI0_MISO_PIN = PA12 // MISO: SERCOM4/PAD[0]
+	SPI0_SCK_PIN = PB11 // SCK: SERCOM4/PAD[3]
+	SPI0_SDO_PIN = PB10 // SDO: SERCOM4/PAD[2]
+	SPI0_SDI_PIN = PA12 // SDI: SERCOM4/PAD[0]
 )
 
 // SPI on the Feather M0.
-var (
-	SPI0 = SPI{
-		Bus:    sam.SERCOM4_SPI,
-		SERCOM: 4,
-	}
-)
+var SPI0 = sercomSPIM4
 
 // I2S pins
 const (
 	I2S_SCK_PIN = PA10
-	I2S_SD_PIN  = PA08
+	I2S_SDO_PIN = PA08
+	I2S_SDI_PIN = NoPin
 	I2S_WS_PIN  = NoPin // TODO: figure out what this is on Feather M0.
+)
+
+// USB CDC identifiers
+const (
+	usb_STRING_PRODUCT      = "Adafruit Feather M0 Express"
+	usb_STRING_MANUFACTURER = "Adafruit"
+)
+
+var (
+	usb_VID uint16 = 0x239A
+	usb_PID uint16 = 0x801B
+)
+
+var (
+	DefaultUART = UART1
 )

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"reflect"
+	"strconv"
 	"unsafe"
 )
 
@@ -16,8 +18,8 @@ type (
 		Y int16
 	}
 	mystruct struct {
-		n    int `foo:"bar"`
-		some point
+		n    int   `foo:"bar"`
+		some point "some\x00tag"
 		zero struct{}
 		buf  []byte
 		Buf  []byte
@@ -26,6 +28,17 @@ type (
 		next *linkedList `description:"chain"`
 		foo  int
 	}
+	selfref struct {
+		x *selfref
+	}
+)
+
+var (
+	errorValue   = errors.New("test error")
+	errorType    = reflect.TypeOf((*error)(nil)).Elem()
+	stringerType = reflect.TypeOf((*interface {
+		String() string
+	})(nil)).Elem()
 )
 
 func main() {
@@ -40,6 +53,12 @@ func main() {
 	println("\nvalues of interfaces")
 	var zeroSlice []byte
 	var zeroFunc func()
+	// by embedding a 0-array func type in your struct, it is not comparable
+	type doNotCompare [0]func()
+	type notComparable struct {
+		doNotCompare
+		data *int32
+	}
 	var zeroMap map[string]int
 	var zeroChan chan int
 	n := 42
@@ -111,8 +130,26 @@ func main() {
 		&linkedList{
 			foo: 42,
 		},
+		struct{ A, B uintptr }{2, 3},
+		// interfaces
+		[]interface{}{3, "str", -4 + 2.5i},
 	} {
 		showValue(reflect.ValueOf(v), "")
+	}
+
+	// Test reflect.New().
+	newInt8 := reflect.New(reflect.TypeOf(int8(0)))
+	newInt8.Elem().SetInt(5)
+	newInt16 := reflect.New(reflect.TypeOf(int16(0)))
+	newInt16.Elem().SetInt(-800)
+	newInt32 := reflect.New(reflect.TypeOf(int32(0)))
+	newInt32.Elem().SetInt(1e8)
+	newInt64 := reflect.New(reflect.TypeOf(int64(0)))
+	newInt64.Elem().SetInt(-1e12)
+	newComplex128 := reflect.New(reflect.TypeOf(0 + 0i))
+	newComplex128.Elem().SetComplex(-8 - 20e5i)
+	for _, val := range []reflect.Value{newInt8, newInt16, newInt32, newInt64, newComplex128} {
+		showValue(val, "")
 	}
 
 	// test sizes
@@ -139,6 +176,26 @@ func main() {
 	assertSize(reflect.TypeOf(uintptr(0)).Size() == unsafe.Sizeof(uintptr(0)), "uintptr")
 	assertSize(reflect.TypeOf("").Size() == unsafe.Sizeof(""), "string")
 	assertSize(reflect.TypeOf(new(int)).Size() == unsafe.Sizeof(new(int)), "*int")
+	assertSize(reflect.TypeOf(zeroFunc).Size() == unsafe.Sizeof(zeroFunc), "func()")
+	assertSize(reflect.TypeOf(zeroChan).Size() == unsafe.Sizeof(zeroChan), "chan int")
+	assertSize(reflect.TypeOf(zeroMap).Size() == unsafe.Sizeof(zeroMap), "map[string]int")
+
+	// make sure embedding a zero-sized "not comparable" struct does not add size to a struct
+	assertSize(reflect.TypeOf(doNotCompare{}).Size() == unsafe.Sizeof(doNotCompare{}), "[0]func()")
+	assertSize(unsafe.Sizeof(notComparable{}) == unsafe.Sizeof((*int32)(nil)), "struct{[0]func(); *int32}")
+
+	// Test that offset is correctly calculated.
+	// This doesn't just test reflect but also (indirectly) that unsafe.Alignof
+	// works correctly.
+	s := struct {
+		small1 byte
+		big1   int64
+		small2 byte
+		big2   int64
+	}{}
+	st := reflect.TypeOf(s)
+	println("offset for int64 matches:", st.Field(1).Offset-st.Field(0).Offset == uintptr(unsafe.Pointer(&s.big1))-uintptr(unsafe.Pointer(&s.small1)))
+	println("offset for complex128 matches:", st.Field(3).Offset-st.Field(2).Offset == uintptr(unsafe.Pointer(&s.big2))-uintptr(unsafe.Pointer(&s.small2)))
 
 	// SetBool
 	rv := reflect.ValueOf(new(bool)).Elem()
@@ -255,6 +312,8 @@ func main() {
 		panic("slice was changed while setting part of it")
 	}
 
+	testAppendSlice()
+
 	// Test types that are created in reflect and never created elsewhere in a
 	// value-to-interface conversion.
 	v := reflect.ValueOf(new(unreferencedType))
@@ -263,6 +322,83 @@ func main() {
 		println("type assertion succeeded for unreferenced type")
 	default:
 		println("type assertion failed (but should succeed)")
+	}
+
+	// Test type that is not referenced at all: not when creating the
+	// reflect.Value (except through the field) and not with a type assert.
+	// Previously this would result in a type assert failure because the Int()
+	// method wasn't picked up.
+	v = reflect.ValueOf(struct {
+		X totallyUnreferencedType
+	}{})
+	if v.Field(0).Interface().(interface {
+		Int() int
+	}).Int() != 42 {
+		println("could not call method on totally unreferenced type")
+	}
+
+	if reflect.TypeOf(new(myint)) != reflect.PtrTo(reflect.TypeOf(myint(0))) {
+		println("PtrTo failed for type myint")
+	}
+	if reflect.TypeOf(new(myslice)) != reflect.PtrTo(reflect.TypeOf(make(myslice, 0))) {
+		println("PtrTo failed for type myslice")
+	}
+
+	if reflect.TypeOf(errorValue).Implements(errorType) != true {
+		println("errorValue.Implements(errorType) was false, expected true")
+	}
+	if reflect.TypeOf(errorValue).Implements(stringerType) != false {
+		println("errorValue.Implements(errorType) was true, expected false")
+	}
+
+	println("\nalignment / offset:")
+	v2 := struct {
+		noCompare [0]func()
+		data      byte
+	}{}
+	println("struct{[0]func(); byte}:", unsafe.Offsetof(v2.data) == uintptr(unsafe.Pointer(&v2.data))-uintptr(unsafe.Pointer(&v2)))
+
+	println("\nstruct tags")
+	TestStructTag()
+
+	println("\nv.Interface() method")
+	testInterfaceMethod()
+
+	// Test reflect.DeepEqual.
+	var selfref1, selfref2 selfref
+	selfref1.x = &selfref1
+	selfref2.x = &selfref2
+	for i, tc := range []struct {
+		v1, v2 interface{}
+		equal  bool
+	}{
+		{int(5), int(5), true},
+		{int(3), int(5), false},
+		{int(5), uint(5), false},
+		{struct {
+			a int
+			b string
+		}{3, "x"}, struct {
+			a int
+			b string
+		}{3, "x"}, true},
+		{struct {
+			a int
+			b string
+		}{3, "x"}, struct {
+			a int
+			b string
+		}{3, "y"}, false},
+		{selfref1, selfref2, true},
+	} {
+		result := reflect.DeepEqual(tc.v1, tc.v2)
+		if result != tc.equal {
+			if tc.equal {
+				println("reflect.DeepEqual() test", i, "not equal while it should be")
+			} else {
+				println("reflect.DeepEqual() test", i, "equal while it should not be")
+			}
+		}
 	}
 }
 
@@ -276,10 +412,19 @@ func showValue(rv reflect.Value, indent string) {
 	}
 	print(indent+"reflect type: ", rt.Kind().String())
 	if rv.CanSet() {
-		print(" settable=", rv.CanSet())
+		print(" settable=true")
+	}
+	if rv.CanAddr() {
+		print(" addrable=true")
+	}
+	if !rv.CanInterface() {
+		print(" caninterface=false")
 	}
 	if !rt.Comparable() {
 		print(" comparable=false")
+	}
+	if name := rt.Name(); name != "" {
+		print(" name=", name)
 	}
 	println()
 	switch rt.Kind() {
@@ -314,6 +459,10 @@ func showValue(rv reflect.Value, indent string) {
 	case reflect.Interface:
 		println(indent + "  interface")
 		println(indent+"  nil:", rv.IsNil())
+		println(indent+"  NumMethod:", rv.NumMethod())
+		if !rv.IsNil() {
+			showValue(rv.Elem(), indent+"  ")
+		}
 	case reflect.Map:
 		println(indent + "  map")
 		println(indent+"  nil:", rv.IsNil())
@@ -336,8 +485,10 @@ func showValue(rv reflect.Value, indent string) {
 		for i := 0; i < rv.NumField(); i++ {
 			field := rt.Field(i)
 			println(indent+"  field:", i, field.Name)
-			println(indent+"  tag:", field.Tag)
+			println(indent+"  pkg:", field.PkgPath)
+			println(indent+"  tag:", strconv.Quote(string(field.Tag)))
 			println(indent+"  embedded:", field.Anonymous)
+			println(indent+"  exported:", field.IsExported())
 			showValue(rv.Field(i), indent+"  ")
 		}
 	default:
@@ -351,4 +502,88 @@ func assertSize(ok bool, typ string) {
 	}
 }
 
+// Test whether appending to a slice is equivalent between reflect and native
+// slice append.
+func testAppendSlice() {
+	for i := 0; i < 100; i++ {
+		dst := makeRandomSlice(i)
+		src := makeRandomSlice(i)
+		result1 := append(dst, src...)
+		result2 := reflect.AppendSlice(reflect.ValueOf(dst), reflect.ValueOf(src)).Interface().([]uint32)
+		if !sliceEqual(result1, result2) {
+			println("slice: mismatch after runtime.SliceAppend with", len(dst), cap(dst), len(src), cap(src))
+		}
+	}
+}
+
+func makeRandomSlice(max int) []uint32 {
+	cap := randuint32() % uint32(max+1)
+	len := randuint32() % (cap + 1)
+	s := make([]uint32, len, cap)
+	for i := uint32(0); i < len; i++ {
+		s[i] = randuint32()
+	}
+	return s
+}
+
+func sliceEqual(s1, s2 []uint32) bool {
+	if len(s1) != len(s2) {
+		return false
+	}
+	for i, val := range s1 {
+		if s2[i] != val {
+			return false
+		}
+	}
+	// Note: can't compare cap because the Go implementation has a different
+	// behavior between the built-in append function and
+	// reflect.AppendSlice.
+	return true
+}
+
 type unreferencedType int
+
+type totallyUnreferencedType int
+
+func (totallyUnreferencedType) Int() int {
+	return 42
+}
+
+func TestStructTag() {
+	type S struct {
+		F string `species:"gopher" color:"blue"`
+	}
+
+	s := S{}
+	st := reflect.TypeOf(s)
+	field := st.Field(0)
+	println(field.Tag.Get("color"), field.Tag.Get("species"))
+}
+
+// Test Interface() call: it should never return an interface itself.
+func testInterfaceMethod() {
+	v := reflect.ValueOf(struct{ X interface{} }{X: 5})
+	println("kind:", v.Field(0).Kind().String())
+	itf := v.Field(0).Interface()
+	switch n := itf.(type) {
+	case int:
+		println("int", n) // correct
+	default:
+		println("something else") // incorrect
+	}
+}
+
+var xorshift32State uint32 = 1
+
+func xorshift32(x uint32) uint32 {
+	// Algorithm "xor" from p. 4 of Marsaglia, "Xorshift RNGs"
+	x ^= x << 13
+	x ^= x >> 17
+	x ^= x << 5
+	return x
+}
+
+func randuint32() uint32 {
+	xorshift32State = xorshift32(xorshift32State)
+	return xorshift32State
+}

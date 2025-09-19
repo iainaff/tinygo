@@ -1,8 +1,12 @@
 package main
 
+import "unsafe"
+
 type MySlice [32]byte
 
 type myUint8 uint8
+
+type RecursiveSlice []RecursiveSlice
 
 // Indexing into slice with named type (regression test).
 var array = [4]int{
@@ -19,6 +23,9 @@ func main() {
 	printslice("foo[1:2]", foo[1:2])
 	println("sum foo:", sum(foo))
 
+	// creating a slice of uncommon base type
+	assert(len(make([]struct{}, makeInt(4))) == 4)
+
 	// creating a slice with uncommon len, cap types
 	assert(len(make([]int, makeInt(2), makeInt(3))) == 2)
 	assert(len(make([]int, makeInt8(2), makeInt8(3))) == 2)
@@ -31,6 +38,7 @@ func main() {
 	assert(len(make([]int, makeUint32(2), makeUint32(3))) == 2)
 	assert(len(make([]int, makeUint64(2), makeUint64(3))) == 2)
 	assert(len(make([]int, makeUintptr(2), makeUintptr(3))) == 2)
+	assert(len(make([]int, makeMyUint8(2), makeMyUint8(3))) == 2)
 
 	// indexing into a slice with uncommon index types
 	assert(foo[int(2)] == 4)
@@ -126,11 +134,38 @@ func main() {
 	}
 	println()
 
+	// Test conversion from array to slice.
+	slice1 := []int{1, 2, 3, 4}
+	arr1 := (*[4]int)(slice1)
+	arr1[1] = -2
+	arr1[2] = 20
+	println("slice to array pointer:", arr1[0], arr1[1], arr1[2], arr1[3])
+
+	// Test unsafe.Add.
+	arr2 := [...]int{1, 2, 3, 4}
+	*(*int)(unsafe.Add(unsafe.Pointer(&arr2[0]), unsafe.Sizeof(int(1))*1)) = 5
+	*addInt(&arr2[0], 2) = 8
+	println("unsafe.Add array:", arr2[0], arr2[1], arr2[2], arr2[3])
+
+	// Test unsafe.Slice.
+	arr3 := [...]int{1, 2, 3, 4}
+	slice3 := unsafe.Slice(&arr3[1], 3)
+	slice3[0] = 9
+	slice3[1] = 15
+	println("unsafe.Slice array:", len(slice3), cap(slice3), slice3[0], slice3[1], slice3[2])
+
 	// Verify the fix in https://github.com/tinygo-org/tinygo/pull/119
 	var unnamed [32]byte
 	var named MySlice
 	assert(len(unnamed[:]) == 32)
 	assert(len(named[:]) == 32)
+	for _, c := range named {
+		assert(c == 0)
+	}
+
+	// Test recursive slices.
+	rs := []RecursiveSlice(nil)
+	println("len:", len(rs))
 }
 
 func printslice(name string, s []int) {
@@ -169,3 +204,8 @@ func makeUint16(x uint16) uint16    { return x }
 func makeUint32(x uint32) uint32    { return x }
 func makeUint64(x uint64) uint64    { return x }
 func makeUintptr(x uintptr) uintptr { return x }
+func makeMyUint8(x myUint8) myUint8 { return x }
+
+func addInt(ptr *int, index uintptr) *int {
+	return (*int)(unsafe.Add(unsafe.Pointer(ptr), unsafe.Sizeof(int(1))*index))
+}

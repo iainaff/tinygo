@@ -2,6 +2,8 @@
 // to define interrupts and to enable/disable them.
 package interrupt
 
+import "unsafe"
+
 // Interrupt provides direct access to hardware interrupts. You can configure
 // this interrupt through this interface.
 //
@@ -24,10 +26,11 @@ func New(id int, handler func(Interrupt)) Interrupt
 // and use that in an Interrupt object. That way the compiler will be able to
 // optimize away all interrupt handles that are never used in a program.
 // This system only works when interrupts need to be enabled before use and this
-// is done only through calling Enable() on this object. If interrups cannot
+// is done only through calling Enable() on this object. If interrupts cannot
 // individually be enabled/disabled, the compiler should create a pseudo-call
 // (like runtime/interrupt.use()) that keeps the interrupt alive.
 type handle struct {
-	handler func(Interrupt)
+	context unsafe.Pointer
+	funcPtr uintptr
 	Interrupt
 }

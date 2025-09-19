@@ -1,11 +1,9 @@
-// +build sam,atsamd51,feather_m4
+//go:build feather_m4
 
 package machine
 
-import "device/sam"
-
 // used to reset into bootloader
-const RESET_MAGIC_VALUE = 0xf01669ef
+const resetMagicValue = 0xf01669ef
 
 // GPIO Pins
 const (
@@ -38,25 +36,31 @@ const (
 )
 
 const (
-	LED = D13
+	LED    = D13
+	WS2812 = D8
 )
 
-// UART0 aka USBCDC pins
+// USBCDC pins
 const (
 	USBCDC_DM_PIN = PA24
 	USBCDC_DP_PIN = PA25
 )
 
-// UART1 pins
 const (
 	UART_TX_PIN = D1
 	UART_RX_PIN = D0
 )
 
-// UART2 pins
 const (
 	UART2_TX_PIN = A4
 	UART2_RX_PIN = A5
+)
+
+var (
+	UART1 = &sercomUSART5
+	UART2 = &sercomUSART0
+
+	DefaultUART = UART1
 )
 
 // I2C pins
@@ -67,23 +71,26 @@ const (
 
 // I2C on the Feather M4.
 var (
-	I2C0 = I2C{
-		Bus:    sam.SERCOM2_I2CM,
-		SERCOM: 2,
-	}
+	I2C0 = sercomI2CM2
 )
 
 // SPI pins
 const (
-	SPI0_SCK_PIN  = D25 // SCK: SERCOM1/PAD[1]
-	SPI0_MOSI_PIN = D24 // MOSI: SERCOM1/PAD[3]
-	SPI0_MISO_PIN = D23 // MISO: SERCOM1/PAD[2]
+	SPI0_SCK_PIN = D25 // SCK: SERCOM1/PAD[1]
+	SPI0_SDO_PIN = D24 // SDO: SERCOM1/PAD[3]
+	SPI0_SDI_PIN = D23 // SDI: SERCOM1/PAD[2]
 )
 
 // SPI on the Feather M4.
+var SPI0 = sercomSPIM1
+
+// USB CDC identifiers
+const (
+	usb_STRING_PRODUCT      = "Adafruit Feather M4"
+	usb_STRING_MANUFACTURER = "Adafruit"
+)
+
 var (
-	SPI0 = SPI{
-		Bus:    sam.SERCOM1_SPIM,
-		SERCOM: 1,
-	}
+	usb_VID uint16 = 0x239A
+	usb_PID uint16 = 0x8022
 )

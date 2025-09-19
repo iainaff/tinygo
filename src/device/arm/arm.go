@@ -2,38 +2,41 @@
 //
 // Original copyright:
 //
-//     Copyright (c) 2009 - 2015 ARM LIMITED
+//	Copyright (c) 2009 - 2015 ARM LIMITED
 //
-//     All rights reserved.
-//     Redistribution and use in source and binary forms, with or without
-//     modification, are permitted provided that the following conditions are met:
-//     - Redistributions of source code must retain the above copyright
-//       notice, this list of conditions and the following disclaimer.
-//     - Redistributions in binary form must reproduce the above copyright
-//       notice, this list of conditions and the following disclaimer in the
-//       documentation and/or other materials provided with the distribution.
-//     - Neither the name of ARM nor the names of its contributors may be used
-//       to endorse or promote products derived from this software without
-//       specific prior written permission.
+//	All rights reserved.
+//	Redistribution and use in source and binary forms, with or without
+//	modification, are permitted provided that the following conditions are met:
+//	- Redistributions of source code must retain the above copyright
+//	  notice, this list of conditions and the following disclaimer.
+//	- Redistributions in binary form must reproduce the above copyright
+//	  notice, this list of conditions and the following disclaimer in the
+//	  documentation and/or other materials provided with the distribution.
+//	- Neither the name of ARM nor the names of its contributors may be used
+//	  to endorse or promote products derived from this software without
+//	  specific prior written permission.
 //
-//     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-//     AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-//     IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-//     ARE DISCLAIMED. IN NO EVENT SHALL COPYRIGHT HOLDERS AND CONTRIBUTORS BE
-//     LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-//     CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-//     SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-//     INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-//     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-//     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-//     POSSIBILITY OF SUCH DAMAGE.
+//	THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+//	AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+//	IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+//	ARE DISCLAIMED. IN NO EVENT SHALL COPYRIGHT HOLDERS AND CONTRIBUTORS BE
+//	LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+//	CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+//	SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+//	INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+//	CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+//	ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+//	POSSIBILITY OF SUCH DAMAGE.
 package arm
 
+import "C"
 import (
 	"errors"
 	"runtime/volatile"
 	"unsafe"
 )
+
+var errCycleCountTooLarge = errors.New("requested cycle count is too large, overflows 24 bit counter")
 
 // Run the given assembly code. The code will be marked as having side effects,
 // as it doesn't produce output and thus would normally be eliminated by the
@@ -44,17 +47,16 @@ func Asm(asm string)
 // effects, as it would otherwise be optimized away. The inline assembly string
 // recognizes template values in the form {name}, like so:
 //
-//     arm.AsmFull(
-//         "str {value}, {result}",
-//         map[string]interface{}{
-//             "value":  1
-//             "result": &dest,
-//         })
-func AsmFull(asm string, regs map[string]interface{})
-
-// ReadRegister returns the contents of the specified register. The register
-// must be a processor register, reachable with the "mov" instruction.
-func ReadRegister(name string) uintptr
+//	arm.AsmFull(
+//	    "str {value}, {result}",
+//	    map[string]interface{}{
+//	        "value":  1
+//	        "result": &dest,
+//	    })
+//
+// You can use {} in the asm string (which expands to a register) to set the
+// return value.
+func AsmFull(asm string, regs map[string]interface{}) uintptr
 
 // Run the following system call (SVCall) with 0 arguments.
 func SVCall0(num uintptr) uintptr
@@ -75,31 +77,7 @@ const (
 	SCS_BASE  = 0xE000E000
 	SYST_BASE = SCS_BASE + 0x0010
 	NVIC_BASE = SCS_BASE + 0x0100
-	SCB_BASE  = SCS_BASE + 0x0D00
 )
-
-const (
-	SCB_AIRCR_VECTKEY_Pos     = 16
-	SCB_AIRCR_SYSRESETREQ_Pos = 2
-	SCB_AIRCR_SYSRESETREQ_Msk = 1 << SCB_AIRCR_SYSRESETREQ_Pos
-)
-
-// System Control Block (SCB)
-//
-// SCB_Type provides the definitions for the System Control Block Registers.
-type SCB_Type struct {
-	CPUID volatile.Register32    // CPUID Base Register
-	ICSR  volatile.Register32    // Interrupt Control and State Register
-	VTOR  volatile.Register32    // Vector Table Offset Register
-	AIRCR volatile.Register32    // Application Interrupt and Reset Control Register
-	SCR   volatile.Register32    // System Control Register
-	CCR   volatile.Register32    // Configuration Control Register
-	_     volatile.Register32    // RESERVED1;
-	SHP   [2]volatile.Register32 // System Handlers Priority Registers. [0] is RESERVED
-	SHCSR volatile.Register32    // System Handler Control and State Register
-}
-
-var SCB = (*SCB_Type)(unsafe.Pointer(uintptr(SCB_BASE)))
 
 // Nested Vectored Interrupt Controller (NVIC).
 //
@@ -168,9 +146,19 @@ const (
 	SYST_CALIB_NOREF     = 0x80000000 // Bit NOREF.
 )
 
+// ClearPendingIRQ clears the pending status of the interrupt.
+func ClearPendingIRQ(irq uint32) {
+	NVIC.ICPR[irq>>5].Set(1 << (irq & 0x1F))
+}
+
 // Enable the given interrupt number.
 func EnableIRQ(irq uint32) {
 	NVIC.ISER[irq>>5].Set(1 << (irq & 0x1F))
+}
+
+// Disable the given interrupt number.
+func DisableIRQ(irq uint32) {
+	NVIC.ICER[irq>>5].Set(1 << (irq & 0x1F))
 }
 
 // Set the priority of the given interrupt number.
@@ -190,34 +178,17 @@ func SetPriority(irq uint32, priority uint32) {
 	NVIC.IPR[regnum].Set((uint32(NVIC.IPR[regnum].Get()) &^ mask) | priority)
 }
 
-// DisableInterrupts disables all interrupts, and returns the old state.
+// DisableInterrupts disables all interrupts, and returns the old interrupt
+// state.
 //
-// TODO: it doesn't actually return the old state, meaning that it cannot be
-// nested.
-func DisableInterrupts() uintptr {
-	Asm("cpsid if")
-	return 0
-}
+//export DisableInterrupts
+func DisableInterrupts() uintptr
 
 // EnableInterrupts enables all interrupts again. The value passed in must be
 // the mask returned by DisableInterrupts.
 //
-// TODO: it doesn't actually use the old state, meaning that it cannot be
-// nested.
-func EnableInterrupts(mask uintptr) {
-	Asm("cpsie if")
-}
-
-// SystemReset performs a hard system reset.
-func SystemReset() {
-	// SCB->AIRCR  = ((0x5FA << SCB_AIRCR_VECTKEY_Pos)      |
-	//              SCB_AIRCR_SYSRESETREQ_Msk);
-	SCB.AIRCR.Set((0x5FA << SCB_AIRCR_VECTKEY_Pos) | SCB_AIRCR_SYSRESETREQ_Msk)
-
-	for {
-		Asm("wfi")
-	}
-}
+//export EnableInterrupts
+func EnableInterrupts(mask uintptr)
 
 // Set up the system timer to generate periodic tick events.
 // This will cause SysTick_Handler to fire once per tick.
@@ -232,7 +203,7 @@ func SetupSystemTimer(cyclecount uint32) error {
 	}
 	if cyclecount&SYST_RVR_RELOAD_Msk != cyclecount {
 		// The cycle refresh register is only 24 bits wide.  The user-specified value will overflow.
-		return errors.New("requested cycle count is too large, overflows 24 bit counter")
+		return errCycleCountTooLarge
 	}
 
 	// set refresh count

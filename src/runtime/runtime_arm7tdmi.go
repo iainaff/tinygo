@@ -1,4 +1,4 @@
-// +build arm7tdmi
+//go:build arm7tdmi
 
 package runtime
 
@@ -7,12 +7,18 @@ import (
 	"unsafe"
 )
 
-type timeUnit int64
-
-const tickMicros = 1
-
 func putchar(c byte) {
 	// dummy, TODO
+}
+
+func getchar() byte {
+	// dummy, TODO
+	return 0
+}
+
+func buffered() int {
+	// dummy, TODO
+	return 0
 }
 
 //go:extern _sbss
@@ -31,16 +37,14 @@ var _sidata [0]byte
 var _edata [0]byte
 
 // Entry point for Go. Initialize all packages and call main.main().
-//go:export main
+//
+//export main
 func main() {
 	// Initialize .data and .bss sections.
 	preinit()
 
-	// Run initializers of all packages.
-	initAll()
-
-	// Compiler-generated call to main.main().
-	callMain()
+	// Run program.
+	run()
 }
 
 func preinit() {
@@ -48,7 +52,7 @@ func preinit() {
 	ptr := unsafe.Pointer(&_sbss)
 	for ptr != unsafe.Pointer(&_ebss) {
 		*(*uint32)(ptr) = 0
-		ptr = unsafe.Pointer(uintptr(ptr) + 4)
+		ptr = unsafe.Add(ptr, 4)
 	}
 
 	// Initialize .data: global variables initialized from flash.
@@ -56,9 +60,17 @@ func preinit() {
 	dst := unsafe.Pointer(&_sdata)
 	for dst != unsafe.Pointer(&_edata) {
 		*(*uint32)(dst) = *(*uint32)(src)
-		dst = unsafe.Pointer(uintptr(dst) + 4)
-		src = unsafe.Pointer(uintptr(src) + 4)
+		dst = unsafe.Add(dst, 4)
+		src = unsafe.Add(src, 4)
 	}
+}
+
+func ticksToNanoseconds(ticks timeUnit) int64 {
+	return int64(ticks)
+}
+
+func nanosecondsToTicks(ns int64) timeUnit {
+	return timeUnit(ns)
 }
 
 func ticks() timeUnit {
@@ -66,28 +78,16 @@ func ticks() timeUnit {
 	return 0
 }
 
-const asyncScheduler = false
-
 func sleepTicks(d timeUnit) {
 	// TODO
+}
+
+func exit(code int) {
+	abort()
 }
 
 func abort() {
 	// TODO
 	for {
 	}
-}
-
-// Implement memset for LLVM and compiler-rt.
-//go:export memset
-func libc_memset(ptr unsafe.Pointer, c byte, size uintptr) {
-	for i := uintptr(0); i < size; i++ {
-		*(*byte)(unsafe.Pointer(uintptr(ptr) + i)) = c
-	}
-}
-
-// Implement memmove for LLVM and compiler-rt.
-//go:export memmove
-func libc_memmove(dst, src unsafe.Pointer, size uintptr) {
-	memmove(dst, src, size)
 }

@@ -8,10 +8,18 @@ defined ints: 5 5
 defined floats: +5.800000e+000 +5.800000e+000
 defined string: defined string
 defined char: 99
+defined expr: 9
 15: 15
 25: 25
 callback 1: 50
 callback 2: 600
+callback inside generic function: 50
+variadic0: 1
+variadic2: 15
+headerfunc: 6
+static headerfunc: 4
+static headerfunc 2: +4.000000e+000
+static headerfunc void: 3
 bool: true true
 float: +3.100000e+000
 double: +3.200000e+000
@@ -25,7 +33,8 @@ struct: true 256 -123456 +3.140000e+000
 array: 5 6 7
 union: true
 union s: 22
-union f: +3.140000e+000
+union f (C.float): +6.280000e+000
+union f (float32): +3.140000e+000
 union global data: 5 8 1
 union local data:  5 8 1
 union s: true
@@ -55,3 +64,21 @@ option F: 11
 option G: 12
 option 2A: 20
 option 3A: 21
+enum width matches: true
+CFLAGS value: 17
+cstr length: 18
+C.CString: string passed to C
+C.charBuf: 2 0 4 8
+C.CStringN: 4 2 0 4 8
+C.GoString(nil): 
+len(C.GoStringN(nil, 0)): 0
+len(C.GoBytes(nil, 0)): 0
+len(C.GoBytes(C.CBytes(nil),0)): 0
+rountrip CBytes: hello
+EINVAL: true
+EAGAIN: true
+copied string: foobar
+CGo sqrt(3): +1.732051e+000
+C   sqrt(3): +1.732051e+000
+line written using C puts
+line written using C printf with value=-21

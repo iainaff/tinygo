@@ -24,6 +24,13 @@ func main() {
 	println("ab" < "aa")
 	println("aa" < "ab")
 
+	h := "hello"
+	println("h < h", h < h)
+	println("h <= h", h <= h)
+	println("h == h", h == h)
+	println("h >= h", h >= h)
+	println("h > h", h > h)
+
 	println("array equality")
 	println(a1 == [2]int{1, 2})
 	println(a1 != [2]int{1, 2})
@@ -61,6 +68,36 @@ func main() {
 	println(c128 != 3+2i)
 	println(c128 != 4+2i)
 	println(c128 != 3+3i)
+
+	println("shifts")
+	println(shlSimple == 4)
+	println(shlOverflow == 0)
+	println(shrSimple == 1)
+	println(shrOverflow == 0)
+	println(ashrNeg == -1)
+	println(ashrOverflow == 0)
+	println(ashrNegOverflow == -1)
+
+	// fix for a bug in constant numbers
+	println("constant number")
+	x := uint32(5)
+	println(uint32(x) / (20e0 / 1))
+
+	// check for signed integer overflow
+	println("-2147483648 / -1:", sdiv32(-2147483648, -1))
+	println("-2147483648 % -1:", srem32(-2147483648, -1))
+
+	type foo struct {
+		n   int
+		itf interface{}
+	}
+
+	var a interface{} = foo{3, float32(5)}
+	var b interface{} = foo{3, float32(3)}
+	var b2 interface{} = foo{3, float32(3)}
+	println("interface equality")
+	println("a==b", a == b)
+	println("b==b2", b == b2)
 }
 
 var x = true
@@ -87,3 +124,31 @@ type Struct2 struct {
 	_ float64
 	i int
 }
+
+func shl(x uint, y uint) uint {
+	return x << y
+}
+
+func shr(x uint, y uint) uint {
+	return x >> y
+}
+
+func ashr(x int, y uint) int {
+	return x >> y
+}
+
+func sdiv32(x, y int32) int32 {
+	return x / y
+}
+
+func srem32(x, y int32) int32 {
+	return x % y
+}
+
+var shlSimple = shl(2, 1)
+var shlOverflow = shl(2, 1000)
+var shrSimple = shr(2, 1)
+var shrOverflow = shr(2, 1000000)
+var ashrNeg = ashr(-1, 1)
+var ashrOverflow = ashr(1, 1000000)
+var ashrNegOverflow = ashr(-1, 1000000)

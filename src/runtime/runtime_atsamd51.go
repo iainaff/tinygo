@@ -1,4 +1,4 @@
-// +build sam,atsamd51
+//go:build (sam && atsamd51) || (sam && atsame5x)
 
 package runtime
 
@@ -6,18 +6,17 @@ import (
 	"device/arm"
 	"device/sam"
 	"machine"
+	"machine/usb/cdc"
 	"runtime/interrupt"
 	"runtime/volatile"
 )
 
-type timeUnit int64
-
-//go:export Reset_Handler
+//export Reset_Handler
 func main() {
+	arm.SCB.CPACR.Set(0) // disable FPU if it is enabled
 	preinit()
-	initAll()
-	callMain()
-	abort()
+	run()
+	exit(0)
 }
 
 func init() {
@@ -26,13 +25,27 @@ func init() {
 	initSERCOMClocks()
 	initUSBClock()
 	initADCClock()
+	enableCache()
 
-	// connect to USB CDC interface
-	machine.UART0.Configure(machine.UARTConfig{})
+	cdc.EnableUSBCDC()
+	machine.USBDev.Configure(machine.UARTConfig{})
+	machine.InitSerial()
 }
 
 func putchar(c byte) {
-	machine.UART0.WriteByte(c)
+	machine.Serial.WriteByte(c)
+}
+
+func getchar() byte {
+	for machine.Serial.Buffered() == 0 {
+		Gosched()
+	}
+	v, _ := machine.Serial.ReadByte()
+	return v
+}
+
+func buffered() int {
+	return machine.Serial.Buffered()
 }
 
 func initClocks() {
@@ -172,6 +185,9 @@ func initClocks() {
 	// it's 32bit cycle counter for timing.
 	//CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
 	//DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+	// Disable automatic NVM write operations
+	sam.NVMCTRL.SetCTRLA_WMODE(sam.NVMCTRL_CTRLA_WMODE_MAN)
 }
 
 func initRTC() {
@@ -204,11 +220,19 @@ func initRTC() {
 	}
 
 	irq := interrupt.New(sam.IRQ_RTC, func(interrupt.Interrupt) {
-		// disable IRQ for CMP0 compare
-		sam.RTC_MODE0.INTFLAG.SetBits(sam.RTC_MODE0_INTENSET_CMP0)
-
-		timerWakeup.Set(1)
+		flags := sam.RTC_MODE0.INTFLAG.Get()
+		if flags&sam.RTC_MODE0_INTENSET_CMP0 != 0 {
+			// The timer (for a sleep) has expired.
+			timerWakeup.Set(1)
+		}
+		if flags&sam.RTC_MODE0_INTENSET_OVF != 0 {
+			// The 32-bit RTC timer has overflowed.
+			rtcOverflows.Set(rtcOverflows.Get() + 1)
+		}
+		// Mark this interrupt has handled for CMP0 and OVF.
+		sam.RTC_MODE0.INTFLAG.Set(sam.RTC_MODE0_INTENSET_CMP0 | sam.RTC_MODE0_INTENSET_OVF)
 	})
+	sam.RTC_MODE0.INTENSET.Set(sam.RTC_MODE0_INTENSET_OVF)
 	irq.SetPriority(0xc0)
 	irq.Enable()
 }
@@ -218,48 +242,78 @@ func waitForSync() {
 	}
 }
 
-// treat all ticks params coming from runtime as being in microseconds
-const tickMicros = 1000
-
-var (
-	timestamp        timeUnit // ticks since boottime
-	timerLastCounter uint64
-)
+var rtcOverflows volatile.Register32 // number of times the RTC wrapped around
 
 var timerWakeup volatile.Register8
 
-const asyncScheduler = false
+// ticksToNanoseconds converts RTC ticks (at 32768Hz) to nanoseconds.
+func ticksToNanoseconds(ticks timeUnit) int64 {
+	// The following calculation is actually the following, but with both sides
+	// reduced to reduce the risk of overflow:
+	//     ticks * 1e9 / 32768
+	return int64(ticks) * 1953125 / 64
+}
+
+// nanosecondsToTicks converts nanoseconds to RTC ticks (running at 32768Hz).
+func nanosecondsToTicks(ns int64) timeUnit {
+	// The following calculation is actually the following, but with both sides
+	// reduced to reduce the risk of overflow:
+	//     ns * 32768 / 1e9
+	return timeUnit(ns * 64 / 1953125)
+}
 
 // sleepTicks should sleep for d number of microseconds.
 func sleepTicks(d timeUnit) {
 	for d != 0 {
-		ticks() // update timestamp
 		ticks := uint32(d)
-		timerSleep(ticks)
+		if !timerSleep(ticks) {
+			return
+		}
 		d -= timeUnit(ticks)
 	}
 }
 
-// ticks returns number of microseconds since start.
+// ticks returns the elapsed time since reset.
 func ticks() timeUnit {
-	waitForSync()
+	// For some ways of capturing the time atomically, see this thread:
+	// https://www.eevblog.com/forum/microcontrollers/correct-timing-by-timer-overflow-count/msg749617/#msg749617
+	// Here, instead of re-reading the counter register if an overflow has been
+	// detected, we simply try again because that results in smaller code.
+	for {
+		mask := interrupt.Disable()
+		counter := readRTC()
+		overflows := rtcOverflows.Get()
+		hasOverflow := sam.RTC_MODE0.INTFLAG.Get()&sam.RTC_MODE0_INTENSET_OVF != 0
+		interrupt.Restore(mask)
 
-	rtcCounter := (uint64(sam.RTC_MODE0.COUNT.Get()) * 305) / 10 // each counter tick == 30.5us
-	offset := (rtcCounter - timerLastCounter)                    // change since last measurement
-	timerLastCounter = rtcCounter
-	timestamp += timeUnit(offset) // TODO: not precise
-	return timestamp
+		if hasOverflow {
+			// There was an overflow while trying to capture the timer.
+			// Try again.
+			continue
+		}
+
+		// This is a 32-bit timer, so the number of timer overflows forms the
+		// upper 32 bits of this timer.
+		return timeUnit(overflows)<<32 + timeUnit(counter)
+	}
+}
+
+func readRTC() uint32 {
+	waitForSync()
+	return sam.RTC_MODE0.COUNT.Get()
 }
 
 // ticks are in microseconds
-func timerSleep(ticks uint32) {
+// Returns true if the timer completed.
+// Returns false if another interrupt occurred which requires an early return to scheduler.
+func timerSleep(ticks uint32) bool {
 	timerWakeup.Set(0)
-	if ticks < 260 {
+	if ticks < 8 {
 		// due to delay waiting for the register value to sync, the minimum sleep value
 		// for the SAMD51 is 260us.
 		// For related info for SAMD21, see:
 		// https://community.atmel.com/comment/2507091#comment-2507091
-		ticks = 260
+		ticks = 8
 	}
 
 	// request read of count
@@ -268,13 +322,25 @@ func timerSleep(ticks uint32) {
 	// set compare value
 	cnt := sam.RTC_MODE0.COUNT.Get()
 
-	sam.RTC_MODE0.COMP[0].Set(uint32(cnt) + (ticks * 10 / 305)) // each counter tick == 30.5us
+	sam.RTC_MODE0.COMP[0].Set(uint32(cnt) + ticks)
 
 	// enable IRQ for CMP0 compare
-	sam.RTC_MODE0.INTENSET.SetBits(sam.RTC_MODE0_INTENSET_CMP0)
+	sam.RTC_MODE0.INTENSET.Set(sam.RTC_MODE0_INTENSET_CMP0)
 
-	for timerWakeup.Get() == 0 {
-		arm.Asm("wfi")
+wait:
+	waitForEvents()
+	if timerWakeup.Get() != 0 {
+		return true
+	}
+	if hasScheduler {
+		// The interurpt may have awoken a goroutine, so bail out early.
+		// Disable IRQ for CMP0 compare.
+		sam.RTC_MODE0.INTENCLR.Set(sam.RTC_MODE0_INTENSET_CMP0)
+		return false
+	} else {
+		// This is running without a scheduler.
+		// The application expects this to sleep the whole time.
+		goto wait
 	}
 }
 
@@ -287,7 +353,7 @@ func initUSBClock() {
 
 	// Put Generic Clock Generator 1 as source for USB
 	//GCLK->PCHCTRL[USB_GCLK_ID].reg = GCLK_PCHCTRL_GEN_GCLK1_Val | (1 << GCLK_PCHCTRL_CHEN_Pos);
-	sam.GCLK.PCHCTRL[10].Set((sam.GCLK_PCHCTRL_GEN_GCLK1 << sam.GCLK_PCHCTRL_GEN_Pos) |
+	sam.GCLK.PCHCTRL[sam.PCHCTRL_GCLK_USB].Set((sam.GCLK_PCHCTRL_GEN_GCLK1 << sam.GCLK_PCHCTRL_GEN_Pos) |
 		sam.GCLK_PCHCTRL_CHEN)
 }
 
@@ -297,8 +363,16 @@ func initADCClock() {
 	sam.MCLK.APBDMASK.SetBits(sam.MCLK_APBDMASK_ADC1_)
 
 	// Put Generic Clock Generator 1 as source for ADC0 and ADC1.
-	sam.GCLK.PCHCTRL[40].Set((sam.GCLK_PCHCTRL_GEN_GCLK1 << sam.GCLK_PCHCTRL_GEN_Pos) |
+	sam.GCLK.PCHCTRL[sam.PCHCTRL_GCLK_ADC0].Set((sam.GCLK_PCHCTRL_GEN_GCLK1 << sam.GCLK_PCHCTRL_GEN_Pos) |
 		sam.GCLK_PCHCTRL_CHEN)
-	sam.GCLK.PCHCTRL[41].Set((sam.GCLK_PCHCTRL_GEN_GCLK1 << sam.GCLK_PCHCTRL_GEN_Pos) |
+	sam.GCLK.PCHCTRL[sam.PCHCTRL_GCLK_ADC1].Set((sam.GCLK_PCHCTRL_GEN_GCLK1 << sam.GCLK_PCHCTRL_GEN_Pos) |
 		sam.GCLK_PCHCTRL_CHEN)
+}
+
+func enableCache() {
+	sam.CMCC.CTRL.SetBits(sam.CMCC_CTRL_CEN)
+}
+
+func waitForEvents() {
+	arm.Asm("wfe")
 }

@@ -1,11 +1,9 @@
-// +build sam,atsamd51,pybadge
+//go:build pybadge
 
 package machine
 
-import "device/sam"
-
 // used to reset into bootloader
-const RESET_MAGIC_VALUE = 0xf01669ef
+const resetMagicValue = 0xf01669ef
 
 // GPIO Pins
 const (
@@ -42,6 +40,7 @@ const (
 const (
 	LED       = D13
 	NEOPIXELS = D8
+	WS2812    = D8
 
 	LIGHTSENSOR = A7
 
@@ -55,13 +54,6 @@ const (
 	TFT_LITE = PA01
 
 	SPEAKER_ENABLE = PA27
-
-	QSPI_SCK    = PB10
-	QSPI_CS     = PB11
-	QSPI_DATA_1 = PA08
-	QSPI_DATA_2 = PA09
-	QSPI_DATA_3 = PA10
-	QSPI_DATA_4 = PA11
 )
 
 const (
@@ -75,7 +67,7 @@ const (
 	BUTTON_B_MASK      = 128
 )
 
-// UART0 aka USBCDC pins
+// USBCDC pins
 const (
 	USBCDC_DM_PIN = PA24
 	USBCDC_DP_PIN = PA25
@@ -87,15 +79,17 @@ const (
 	UART_RX_PIN = D0
 )
 
-// UART1 var is on SERCOM3, defined in atsamd51.go
-
-// UART2 pins
 const (
 	UART2_TX_PIN = A4
 	UART2_RX_PIN = A5
 )
 
-// UART2 var is on SERCOM0, defined in atsamd51.go
+var (
+	UART1 = &sercomUSART5
+	UART2 = &sercomUSART0
+
+	DefaultUART = UART1
+)
 
 // I2C pins
 const (
@@ -104,39 +98,65 @@ const (
 )
 
 // I2C on the ItsyBitsy M4.
-var (
-	I2C0 = I2C{
-		Bus:    sam.SERCOM2_I2CM,
-		SERCOM: 2,
-	}
-)
+var I2C0 = sercomI2CM2
 
 // SPI pins
 const (
-	SPI0_SCK_PIN  = PA17 // SCK: SERCOM1/PAD[1]
-	SPI0_MOSI_PIN = PB23 // MOSI: SERCOM1/PAD[3]
-	SPI0_MISO_PIN = PB22 // MISO: SERCOM1/PAD[2]
-)
-
-// SPI on the PyBadge.
-var (
-	SPI0 = SPI{
-		Bus:    sam.SERCOM1_SPIM,
-		SERCOM: 1,
-	}
+	SPI0_SCK_PIN = PA17 // SCK: SERCOM1/PAD[1]
+	SPI0_SDO_PIN = PB23 // SDO: SERCOM1/PAD[3]
+	SPI0_SDI_PIN = PB22 // SDI: SERCOM1/PAD[2]
 )
 
 // TFT SPI pins
 const (
-	SPI1_SCK_PIN  = PB13 // SCK: SERCOM4/PAD[1]
-	SPI1_MOSI_PIN = PB15 // MOSI: SERCOM4/PAD[3]
-	SPI1_MISO_PIN = NoPin
+	SPI1_SCK_PIN = PB13 // SCK: SERCOM4/PAD[1]
+	SPI1_SDO_PIN = PB15 // SDO: SERCOM4/PAD[3]
+	SPI1_SDI_PIN = NoPin
 )
 
+// SPI on the PyBadge.
+var SPI0 = sercomSPIM1
+
 // TFT SPI on the PyBadge.
+var SPI1 = sercomSPIM4
+
+// USB CDC identifiers
+const (
+	usb_STRING_PRODUCT      = "Adafruit pyBadge M4"
+	usb_STRING_MANUFACTURER = "Adafruit"
+)
+
 var (
-	SPI1 = SPI{
-		Bus:    sam.SERCOM4_SPIM,
-		SERCOM: 4,
-	}
+	usb_VID uint16 = 0x239A
+	usb_PID uint16 = 0x8033
+)
+
+// NINA-W102 settings when using AirLift WiFi FeatherWing
+const (
+	NINA_BAUDRATE         = 115200
+	NINA_RESET_INVERTED   = true
+	NINA_SOFT_FLOWCONTROL = true
+)
+
+const (
+	NINA_CS     = D13
+	NINA_ACK    = D11
+	NINA_GPIO0  = D10
+	NINA_RESETN = D12
+
+	// pins used for the ESP32 connection do not allow hardware
+	// flow control, which is required. have to emulate with software.
+	NINA_TX  = UART_TX_PIN
+	NINA_RX  = UART_RX_PIN
+	NINA_CTS = NINA_ACK
+	NINA_RTS = NINA_GPIO0
+
+	NINA_SDO = SPI0_SDO_PIN
+	NINA_SDI = SPI0_SDI_PIN
+	NINA_SCK = SPI0_SCK_PIN
+)
+
+var (
+	NINA_SPI  = SPI0
+	UART_NINA = UART1
 )

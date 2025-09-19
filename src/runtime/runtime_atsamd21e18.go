@@ -1,4 +1,4 @@
-// +build sam,atsamd21,atsamd21e18
+//go:build sam && atsamd21 && atsamd21e18
 
 package runtime
 

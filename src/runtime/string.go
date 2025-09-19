@@ -3,6 +3,7 @@ package runtime
 // This file implements functions related to Go strings.
 
 import (
+	"internal/gclayout"
 	"unsafe"
 )
 
@@ -18,6 +19,7 @@ type stringIterator struct {
 }
 
 // Return true iff the strings match.
+//
 //go:nobounds
 func stringEqual(x, y string) bool {
 	if len(x) != len(y) {
@@ -32,6 +34,7 @@ func stringEqual(x, y string) bool {
 }
 
 // Return true iff x < y.
+//
 //go:nobounds
 func stringLess(x, y string) bool {
 	l := len(x)
@@ -57,9 +60,9 @@ func stringConcat(x, y _string) _string {
 		return x
 	} else {
 		length := x.length + y.length
-		buf := alloc(length)
+		buf := alloc(length, gclayout.NoPtrs.AsPtr())
 		memcpy(buf, unsafe.Pointer(x.ptr), x.length)
-		memcpy(unsafe.Pointer(uintptr(buf)+x.length), unsafe.Pointer(y.ptr), y.length)
+		memcpy(unsafe.Add(buf, x.length), unsafe.Pointer(y.ptr), y.length)
 		return _string{ptr: (*byte)(buf), length: length}
 	}
 }
@@ -70,7 +73,7 @@ func stringFromBytes(x struct {
 	len uintptr
 	cap uintptr
 }) _string {
-	buf := alloc(x.len)
+	buf := alloc(x.len, gclayout.NoPtrs.AsPtr())
 	memcpy(buf, unsafe.Pointer(x.ptr), x.len)
 	return _string{ptr: (*byte)(buf), length: x.len}
 }
@@ -81,7 +84,7 @@ func stringToBytes(x _string) (slice struct {
 	len uintptr
 	cap uintptr
 }) {
-	buf := alloc(x.length)
+	buf := alloc(x.length, gclayout.NoPtrs.AsPtr())
 	memcpy(buf, unsafe.Pointer(x.ptr), x.length)
 	slice.ptr = (*byte)(buf)
 	slice.len = x.length
@@ -98,14 +101,14 @@ func stringFromRunes(runeSlice []rune) (s _string) {
 	}
 
 	// Allocate memory for the string.
-	s.ptr = (*byte)(alloc(s.length))
+	s.ptr = (*byte)(alloc(s.length, gclayout.NoPtrs.AsPtr()))
 
 	// Encode runes to UTF-8 and store the resulting bytes in the string.
 	index := uintptr(0)
 	for _, r := range runeSlice {
 		array, numBytes := encodeUTF8(r)
 		for _, c := range array[:numBytes] {
-			*(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(s.ptr)) + index)) = c
+			*(*byte)(unsafe.Add(unsafe.Pointer(s.ptr), index)) = c
 			index++
 		}
 	}
@@ -160,6 +163,9 @@ func encodeUTF8(x rune) ([4]byte, uintptr) {
 		b1 := 0xc0 | byte(x>>6)
 		b2 := 0x80 | byte(x&0x3f)
 		return [4]byte{b1, b2, 0, 0}, 2
+	case 0xd800 <= x && x <= 0xdfff:
+		// utf-16 surrogates are replaced with "invalid code point"
+		return [4]byte{0xef, 0xbf, 0xbd, 0}, 3
 	case x <= 0xffff:
 		b1 := 0xe0 | byte(x>>12)
 		b2 := 0x80 | byte((x>>6)&0x3f)
@@ -178,6 +184,7 @@ func encodeUTF8(x rune) ([4]byte, uintptr) {
 }
 
 // Decode a single UTF-8 character from a string.
+//
 //go:nobounds
 func decodeUTF8(s string, index uintptr) (rune, uintptr) {
 	remaining := uintptr(len(s)) - index // must be >= 1 before calling this function
@@ -186,33 +193,101 @@ func decodeUTF8(s string, index uintptr) (rune, uintptr) {
 	case x&0x80 == 0x00: // 0xxxxxxx
 		return rune(x), 1
 	case x&0xe0 == 0xc0: // 110xxxxx
-		if remaining < 2 {
+		if remaining < 2 || !isContinuation(s[index+1]) {
 			return 0xfffd, 1
 		}
-		return (rune(x&0x1f) << 6) | (rune(s[index+1]) & 0x3f), 2
+		r := (rune(x&0x1f) << 6) | (rune(s[index+1]) & 0x3f)
+		if r >= 1<<7 {
+			// Check whether the rune really needed to be encoded as a two-byte
+			// sequence. UTF-8 requires every rune to be encoded in the smallest
+			// sequence possible.
+			return r, 2
+		}
 	case x&0xf0 == 0xe0: // 1110xxxx
-		if remaining < 3 {
+		if remaining < 3 || !isContinuation(s[index+1]) || !isContinuation(s[index+2]) {
 			return 0xfffd, 1
 		}
-		return (rune(x&0x0f) << 12) | ((rune(s[index+1]) & 0x3f) << 6) | (rune(s[index+2]) & 0x3f), 3
+		r := (rune(x&0x0f) << 12) | ((rune(s[index+1]) & 0x3f) << 6) | (rune(s[index+2]) & 0x3f)
+		if r >= 1<<11 && !(r >= 0xD800 && r <= 0xDFFF) {
+			// Check whether the rune really needed to be encoded as a
+			// three-byte sequence and check that this is not a Unicode
+			// surrogate pair (which are not allowed by UTF-8).
+			return r, 3
+		}
 	case x&0xf8 == 0xf0: // 11110xxx
-		if remaining < 4 {
+		if remaining < 4 || !isContinuation(s[index+1]) || !isContinuation(s[index+2]) || !isContinuation(s[index+3]) {
 			return 0xfffd, 1
 		}
-		return (rune(x&0x07) << 18) | ((rune(s[index+1]) & 0x3f) << 12) | ((rune(s[index+2]) & 0x3f) << 6) | (rune(s[index+3]) & 0x3f), 4
-	default:
-		return 0xfffd, 1
+		r := (rune(x&0x07) << 18) | ((rune(s[index+1]) & 0x3f) << 12) | ((rune(s[index+2]) & 0x3f) << 6) | (rune(s[index+3]) & 0x3f)
+		if r >= 1<<16 && r <= '\U0010FFFF' {
+			// Check whether this rune really needed to be encoded as a four
+			// byte sequence and check that the resulting rune is in the valid
+			// range (up to at most U+10FFFF).
+			return r, 4
+		}
 	}
+
+	// Failed to decode. Return the Unicode replacement character and a length of 1.
+	return 0xfffd, 1
 }
 
-// indexByteString returns the index of the first instance of c in s, or -1 if c
-// is not present in s.
-//go:linkname indexByteString internal/bytealg.IndexByteString
-func indexByteString(s string, c byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return i
-		}
+// isContinuation returns true if (and only if) this is a UTF-8 continuation
+// byte.
+func isContinuation(b byte) bool {
+	// Continuation bytes have their topmost bits set to 0b10.
+	return b&0xc0 == 0x80
+}
+
+// Functions used in CGo.
+
+// Convert a Go string to a C string.
+func cgo_CString(s _string) unsafe.Pointer {
+	buf := malloc(s.length + 1)
+	memcpy(buf, unsafe.Pointer(s.ptr), s.length)
+	*(*byte)(unsafe.Add(buf, s.length)) = 0 // trailing 0 byte
+	return buf
+}
+
+// Convert a C string to a Go string.
+func cgo_GoString(cstr unsafe.Pointer) _string {
+	if cstr == nil {
+		return _string{}
 	}
-	return -1
+	return makeGoString(cstr, strlen(cstr))
+}
+
+// Convert a C data buffer to a Go string (that possibly contains 0 bytes).
+func cgo_GoStringN(cstr unsafe.Pointer, length uintptr) _string {
+	return makeGoString(cstr, length)
+}
+
+// Make a Go string given a source buffer and a length.
+func makeGoString(cstr unsafe.Pointer, length uintptr) _string {
+	s := _string{
+		length: length,
+	}
+	if s.length != 0 {
+		buf := make([]byte, s.length)
+		s.ptr = &buf[0]
+		memcpy(unsafe.Pointer(s.ptr), cstr, s.length)
+	}
+	return s
+}
+
+// Convert a C data buffer to a Go byte slice.
+func cgo_GoBytes(ptr unsafe.Pointer, length uintptr) []byte {
+	// Note: don't return nil if length is 0, to match the behavior of C.GoBytes
+	// of upstream Go.
+	buf := make([]byte, length)
+	if length != 0 {
+		memcpy(unsafe.Pointer(&buf[0]), ptr, uintptr(length))
+	}
+	return buf
+}
+
+func cgo_CBytes(b []byte) unsafe.Pointer {
+	p := malloc(uintptr(len(b)))
+	s := unsafe.Slice((*byte)(p), len(b))
+	copy(s, b)
+	return p
 }

@@ -1,11 +1,7 @@
 {
-	"inherits": ["cortex-m"],
-	"llvm-target": "armv7em-none-eabi",
+	"inherits": ["cortex-m4"],
 	"build-tags": ["nrf52", "nrf"],
 	"cflags": [
-		"--target=armv7em-none-eabi",
-		"-mfloat-abi=soft",
-		"-Qunused-arguments",
 		"-DNRF52832_XXAA",
 		"-I{root}/lib/CMSIS/CMSIS/Include",
 		"-I{root}/lib/nrfx/mdk"
@@ -15,5 +11,6 @@
 		"lib/nrfx/mdk/system_nrf52.c",
 		"src/device/nrf/nrf52.s"
 	],
+	"openocd-transport": "swd",
 	"openocd-target": "nrf51"
 }

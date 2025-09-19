@@ -10,13 +10,13 @@ import (
 // The original license can be found here:
 //     https://golang.org/LICENSE
 
-type StdSizes struct {
+type stdSizes struct {
 	IntSize  int64
 	PtrSize  int64
 	MaxAlign int64
 }
 
-func (s *StdSizes) Alignof(T types.Type) int64 {
+func (s *stdSizes) Alignof(T types.Type) int64 {
 	// For arrays and structs, alignment is defined in terms
 	// of alignment of the elements and fields, respectively.
 	switch t := T.Underlying().(type) {
@@ -45,7 +45,11 @@ func (s *StdSizes) Alignof(T types.Type) int64 {
 		if t.Info()&types.IsString != 0 {
 			return s.PtrSize
 		}
+	case *types.Signature:
+		// Even though functions in tinygo are 2 pointers, they are not 2 pointer aligned
+		return s.PtrSize
 	}
+
 	a := s.Sizeof(T) // may be 0
 	// spec: "For a variable x of any type: unsafe.Alignof(x) is at least 1."
 	if a < 1 {
@@ -61,7 +65,7 @@ func (s *StdSizes) Alignof(T types.Type) int64 {
 	return a
 }
 
-func (s *StdSizes) Offsetsof(fields []*types.Var) []int64 {
+func (s *stdSizes) Offsetsof(fields []*types.Var) []int64 {
 	offsets := make([]int64, len(fields))
 	var o int64
 	for i, f := range fields {
@@ -89,7 +93,7 @@ var basicSizes = [...]byte{
 	types.Complex128: 16,
 }
 
-func (s *StdSizes) Sizeof(T types.Type) int64 {
+func (s *stdSizes) Sizeof(T types.Type) int64 {
 	switch t := T.Underlying().(type) {
 	case *types.Basic:
 		k := t.Kind()
@@ -148,8 +152,11 @@ func (s *StdSizes) Sizeof(T types.Type) int64 {
 		return align(offsets[n-1]+s.Sizeof(fields[n-1].Type()), maxAlign)
 	case *types.Interface:
 		return s.PtrSize * 2
-	case *types.Pointer:
+	case *types.Pointer, *types.Chan, *types.Map:
 		return s.PtrSize
+	case *types.Signature:
+		// Func values in TinyGo are two words in size.
+		return s.PtrSize * 2
 	default:
 		panic("unknown type: " + t.String())
 	}

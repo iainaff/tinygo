@@ -1,76 +1,43 @@
-# TinyGo base stage installs Go 1.13, LLVM 9 and the TinyGo compiler itself.
-FROM golang:1.13 AS tinygo-base
+# tinygo-llvm stage obtains the llvm source for TinyGo
+FROM golang:1.25 AS tinygo-llvm
 
-RUN wget -O- https://apt.llvm.org/llvm-snapshot.gpg.key| apt-key add - && \
-    echo "deb http://apt.llvm.org/buster/ llvm-toolchain-buster-9 main" >> /etc/apt/sources.list && \
-    apt-get update && \
-    apt-get install -y llvm-9-dev libclang-9-dev git
+RUN apt-get update && \
+    apt-get install -y apt-utils make cmake clang-17 ninja-build && \
+    rm -rf \
+        /var/lib/apt/lists/* \
+        /var/log/* \
+        /var/tmp/* \
+        /tmp/*
+
+COPY ./GNUmakefile /tinygo/GNUmakefile
+
+RUN cd /tinygo/ && \
+    make llvm-source
+
+# tinygo-llvm-build stage build the custom llvm with xtensa support
+FROM tinygo-llvm AS tinygo-llvm-build
+
+RUN cd /tinygo/ && \
+    make llvm-build
+
+# tinygo-compiler-build stage builds the compiler itself
+FROM tinygo-llvm-build AS tinygo-compiler-build
 
 COPY . /tinygo
 
-# remove submodules directories and re-init them to fix any hard-coded paths
-# after copying the tinygo directory in the previous step.
+# build the compiler and tools
 RUN cd /tinygo/ && \
-    rm -rf ./lib/* && \
-    git submodule update --init --recursive --force
+    git submodule update --init && \
+    make gen-device -j4 && \
+    make build/release
 
-RUN cd /tinygo/ && \
-    go install /tinygo/
+# tinygo-compiler copies the compiler build over to a base Go container (without
+# all the build tools etc).
+FROM golang:1.25 AS tinygo-compiler
 
-# tinygo-wasm stage installs the needed dependencies to compile TinyGo programs for WASM.
-FROM tinygo-base AS tinygo-wasm
+# Copy tinygo build.
+COPY --from=tinygo-compiler-build /tinygo/build/release/tinygo /tinygo
 
-COPY --from=tinygo-base /go/bin/tinygo /go/bin/tinygo
-COPY --from=tinygo-base /tinygo/src /tinygo/src
-COPY --from=tinygo-base /tinygo/targets /tinygo/targets
-
-RUN wget -O- https://apt.llvm.org/llvm-snapshot.gpg.key| apt-key add - && \
-    echo "deb http://apt.llvm.org/buster/ llvm-toolchain-buster-9 main" >> /etc/apt/sources.list && \
-    apt-get update && \
-    apt-get install -y libllvm9 lld-9
-
-# tinygo-avr stage installs the needed dependencies to compile TinyGo programs for AVR microcontrollers.
-FROM tinygo-base AS tinygo-avr
-
-COPY --from=tinygo-base /go/bin/tinygo /go/bin/tinygo
-COPY --from=tinygo-base /tinygo/src /tinygo/src
-COPY --from=tinygo-base /tinygo/targets /tinygo/targets
-COPY --from=tinygo-base /tinygo/Makefile /tinygo/
-COPY --from=tinygo-base /tinygo/tools /tinygo/tools
-COPY --from=tinygo-base /tinygo/lib /tinygo/lib
-
-RUN cd /tinygo/ && \
-    apt-get update && \
-    apt-get install -y apt-utils make binutils-avr gcc-avr avr-libc && \
-    make gen-device-avr && \
-    apt-get autoremove -y && \
-    apt-get clean
-
-# tinygo-arm stage installs the needed dependencies to compile TinyGo programs for ARM microcontrollers.
-FROM tinygo-base AS tinygo-arm
-
-COPY --from=tinygo-base /go/bin/tinygo /go/bin/tinygo
-COPY --from=tinygo-base /tinygo/src /tinygo/src
-COPY --from=tinygo-base /tinygo/targets /tinygo/targets
-COPY --from=tinygo-base /tinygo/Makefile /tinygo/
-COPY --from=tinygo-base /tinygo/tools /tinygo/tools
-COPY --from=tinygo-base /tinygo/lib /tinygo/lib
-
-RUN cd /tinygo/ && \
-    apt-get update && \
-    apt-get install -y apt-utils make clang-9 && \
-    make gen-device-nrf && make gen-device-stm32
-
-# tinygo-all stage installs the needed dependencies to compile TinyGo programs for all platforms.
-FROM tinygo-wasm AS tinygo-all
-
-COPY --from=tinygo-base /tinygo/Makefile /tinygo/
-COPY --from=tinygo-base /tinygo/tools /tinygo/tools
-COPY --from=tinygo-base /tinygo/lib /tinygo/lib
-
-RUN cd /tinygo/ && \
-    apt-get update && \
-    apt-get install -y apt-utils make clang-9 binutils-avr gcc-avr avr-libc && \
-    make gen-device
-
+# Configure the container.
+ENV PATH="${PATH}:/tinygo/bin"
 CMD ["tinygo"]

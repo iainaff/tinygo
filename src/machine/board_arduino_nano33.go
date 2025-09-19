@@ -1,13 +1,12 @@
-// +build arduino_nano33
+//go:build arduino_nano33
 
 // This contains the pin mappings for the Arduino Nano33 IoT board.
 //
 // For more information, see: https://store.arduino.cc/nano-33-iot
-//
 package machine
 
 // used to reset into bootloader
-const RESET_MAGIC_VALUE = 0x07738135
+const resetMagicValue = 0x07738135
 
 // GPIO Pins
 const (
@@ -46,7 +45,7 @@ const (
 	LED = D13
 )
 
-// UART0 aka USBCDC pins
+// USBCDC pins
 const (
 	USBCDC_DM_PIN Pin = PA24
 	USBCDC_DP_PIN Pin = PA25
@@ -58,35 +57,79 @@ const (
 	UART_RX_PIN Pin = PA23
 )
 
+// UART1 on the Arduino Nano 33 connects to the onboard NINA-W102 WiFi chip.
+var UART1 = &sercomUSART3
+
+// UART2 on the Arduino Nano 33 connects to the normal TX/RX pins.
+var UART2 = &sercomUSART5
+
+// UART_NINA on the Arduino Nano 33 connects to the NINA HCI.
+var UART_NINA = &sercomUSART2
+
 // I2C pins
 const (
 	SDA_PIN Pin = A4 // SDA: SERCOM4/PAD[1]
 	SCL_PIN Pin = A5 // SCL: SERCOM4/PAD[1]
 )
 
+// I2C on the Arduino Nano 33.
+var (
+	I2C0 = sercomI2CM4
+)
+
 // SPI pins
 const (
-	SPI0_SCK_PIN  Pin = D13 // SCK: SERCOM1/PAD[1]
-	SPI0_MOSI_PIN Pin = D11 // MOSI: SERCOM1/PAD[0]
-	SPI0_MISO_PIN Pin = D12 // MISO: SERCOM1/PAD[3]
+	SPI0_SCK_PIN Pin = D13 // SCK: SERCOM1/PAD[1]
+	SPI0_SDO_PIN Pin = D11 // SDO: SERCOM1/PAD[0]
+	SPI0_SDI_PIN Pin = D12 // SDI: SERCOM1/PAD[3]
+)
+
+// SPI on the Arduino Nano 33.
+var SPI0 = sercomSPIM1
+
+// SPI1 is connected to the NINA-W102 chip on the Arduino Nano 33.
+var (
+	SPI1     = sercomSPIM2
+	NINA_SPI = SPI1
 )
 
 // NINA-W102 Pins
 const (
-	NINA_MOSI   Pin = PA12
-	NINA_MISO   Pin = PA13
+	NINA_SDO    Pin = PA12
+	NINA_SDI    Pin = PA13
 	NINA_CS     Pin = PA14
 	NINA_SCK    Pin = PA15
 	NINA_GPIO0  Pin = PA27
 	NINA_RESETN Pin = PA08
 	NINA_ACK    Pin = PA28
-	NINA_TX     Pin = PA22
-	NINA_RX     Pin = PA23
+	NINA_TX     Pin = PA12
+	NINA_RX     Pin = PA13
+	NINA_RTS    Pin = PA14
+	NINA_CTS    Pin = PA15
+)
+
+// NINA-W102 settings
+const (
+	NINA_BAUDRATE         = 912600
+	NINA_RESET_INVERTED   = true
+	NINA_SOFT_FLOWCONTROL = false
 )
 
 // I2S pins
 const (
 	I2S_SCK_PIN Pin = PA10
-	I2S_SD_PIN  Pin = PA08
+	I2S_SDO_PIN Pin = PA08
+	I2S_SDI_PIN     = NoPin
 	I2S_WS_PIN      = NoPin // TODO: figure out what this is on Arduino Nano 33.
+)
+
+// USB CDC identifiers
+const (
+	usb_STRING_PRODUCT      = "Arduino NANO 33 IoT"
+	usb_STRING_MANUFACTURER = "Arduino"
+)
+
+var (
+	usb_VID uint16 = 0x2341
+	usb_PID uint16 = 0x8057
 )

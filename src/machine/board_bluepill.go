@@ -1,4 +1,4 @@
-// +build bluepill
+//go:build bluepill
 
 package machine
 
@@ -7,48 +7,67 @@ import (
 	"runtime/interrupt"
 )
 
-// https://wiki.stm32duino.com/index.php?title=File:Bluepillpinout.gif
+// Pins printed on the silkscreen
 const (
-	PA0  = portA + 0
-	PA1  = portA + 1
-	PA2  = portA + 2
-	PA3  = portA + 3
-	PA4  = portA + 4
-	PA5  = portA + 5
-	PA6  = portA + 6
-	PA7  = portA + 7
-	PA8  = portA + 8
-	PA9  = portA + 9
-	PA10 = portA + 10
-	PA11 = portA + 11
-	PA12 = portA + 12
-	PA13 = portA + 13
-	PA14 = portA + 14
-	PA15 = portA + 15
-	PB0  = portB + 0
-	PB1  = portB + 1
-	PB2  = portB + 2
-	PB3  = portB + 3
-	PB4  = portB + 4
-	PB5  = portB + 5
-	PB6  = portB + 6
-	PB7  = portB + 7
-	PB8  = portB + 8
-	PB9  = portB + 9
-	PB10 = portB + 10
-	PB11 = portB + 11
-	PB12 = portB + 12
-	PB13 = portB + 13
-	PB14 = portB + 14
-	PB15 = portB + 15
-	PC13 = portC + 13
-	PC14 = portC + 14
-	PC15 = portC + 15
+	C13 = PC13
+	C14 = PC14
+	C15 = PC15
+	A0  = PA0
+	A1  = PA1
+	A2  = PA2
+	A3  = PA3
+	A4  = PA4
+	A5  = PA5
+	A6  = PA6
+	A7  = PA7
+	B0  = PB0
+	B1  = PB1
+	B10 = PB10
+	B11 = PB11
+	B12 = PB12
+	B13 = PB13
+	B14 = PB14
+	B15 = PB15
+	A8  = PA8
+	A9  = PA9
+	A10 = PA10
+	A11 = PA11
+	A12 = PA12
+	A13 = PA13
+	A14 = PA14
+	A15 = PA15
+	B3  = PB3
+	B4  = PB4
+	B5  = PB5
+	B6  = PB6
+	B7  = PB7
+	B8  = PB8
+	B9  = PB9
+)
+
+// Analog Pins
+const (
+	ADC0 = PA0
+	ADC1 = PA1
+	ADC2 = PA2
+	ADC3 = PA3
+	ADC4 = PA4
+	ADC5 = PA5
+	ADC6 = PA6
+	ADC7 = PA7
+	ADC8 = PB0
+	ADC9 = PB1
 )
 
 const (
+	// This board does not have a user button, so
+	// use first GPIO pin by default
+	BUTTON = PA0
+
 	LED = PC13
 )
+
+var DefaultUART = UART1
 
 // UART pins
 const (
@@ -60,27 +79,32 @@ const (
 
 var (
 	// USART1 is the first hardware serial port on the STM32.
-	// Both UART0 and UART1 refer to USART1.
-	UART0 = UART{
+	UART1  = &_UART1
+	_UART1 = UART{
 		Buffer: NewRingBuffer(),
 		Bus:    stm32.USART1,
 	}
-	UART1 = &UART0
+	UART2  = &_UART2
+	_UART2 = UART{
+		Buffer: NewRingBuffer(),
+		Bus:    stm32.USART2,
+	}
 )
 
 func init() {
-	UART0.Interrupt = interrupt.New(stm32.IRQ_USART1, UART0.handleInterrupt)
+	UART1.Interrupt = interrupt.New(stm32.IRQ_USART1, _UART1.handleInterrupt)
+	UART2.Interrupt = interrupt.New(stm32.IRQ_USART2, _UART2.handleInterrupt)
 }
 
 // SPI pins
 const (
-	SPI0_SCK_PIN  = PA5
-	SPI0_MOSI_PIN = PA7
-	SPI0_MISO_PIN = PA6
+	SPI0_SCK_PIN = PA5
+	SPI0_SDO_PIN = PA7
+	SPI0_SDI_PIN = PA6
 )
 
 // I2C pins
 const (
-	SDA_PIN = PB7
-	SCL_PIN = PB6
+	I2C0_SDA_PIN = PB7
+	I2C0_SCL_PIN = PB6
 )

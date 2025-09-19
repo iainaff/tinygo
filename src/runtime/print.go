@@ -39,6 +39,17 @@ func printint8(n int8) {
 	}
 }
 
+func printuintptr(n uintptr) {
+	switch unsafe.Sizeof(n) {
+	case 2:
+		printuint16(uint16(n))
+	case 4:
+		printuint32(uint32(n))
+	case 8:
+		printuint64(uint64(n))
+	}
+}
+
 func printuint16(n uint16) {
 	printuint32(uint32(n))
 }
@@ -47,23 +58,8 @@ func printint16(n int16) {
 	printint32(int32(n))
 }
 
-//go:nobounds
 func printuint32(n uint32) {
-	digits := [10]byte{} // enough to hold (2^32)-1
-	// Fill in all 10 digits.
-	firstdigit := 9 // digit index that isn't zero (by default, the last to handle '0' correctly)
-	for i := 9; i >= 0; i-- {
-		digit := byte(n%10 + '0')
-		digits[i] = digit
-		if digit != '0' {
-			firstdigit = i
-		}
-		n /= 10
-	}
-	// Print digits without the leading zeroes.
-	for i := firstdigit; i < 10; i++ {
-		putchar(digits[i])
-	}
+	printuint64(uint64(n))
 }
 
 func printint32(n int32) {
@@ -76,12 +72,23 @@ func printint32(n int32) {
 	printuint32(uint32(n))
 }
 
+//go:nobounds
 func printuint64(n uint64) {
-	prevdigits := n / 10
-	if prevdigits != 0 {
-		printuint64(prevdigits)
+	digits := [20]byte{} // enough to hold (2^64)-1
+	// Fill in all 10 digits.
+	firstdigit := 19 // digit index that isn't zero (by default, the last to handle '0' correctly)
+	for i := 19; i >= 0; i-- {
+		digit := byte(n%10 + '0')
+		digits[i] = digit
+		if digit != '0' {
+			firstdigit = i
+		}
+		n /= 10
 	}
-	putchar(byte((n % 10) + '0'))
+	// Print digits without the leading zeroes.
+	for i := firstdigit; i < 20; i++ {
+		putchar(digits[i])
+	}
 }
 
 func printint64(n int64) {
@@ -92,10 +99,90 @@ func printint64(n int64) {
 	printuint64(uint64(n))
 }
 
+// printfloat32() was copied from the relevant source in the original Go
+// implementation and modified to work with float32 instead of float64. It is
+// copyright by the Go authors, licensed under the same BSD 3-clause license.
+// See https://golang.org/LICENSE for details.
+//
+// It is a near-duplicate of printfloat64. This is done so that printing a
+// float32 value doesn't involve float64 routines, which can be unexpected and a
+// problem sometimes. It comes with a possible code size reduction if both
+// printfloat32 and printfloat64 are used, which seems uncommon.
+//
+// Source:
+// https://github.com/golang/go/blob/master/src/runtime/print.go
 func printfloat32(v float32) {
-	// TODO: write an implementation like printfloat64, as some systems have
-	// 32-bit floats but only software emulation for 64-bit floats.
-	printfloat64(float64(v))
+	switch {
+	case v != v:
+		printstring("NaN")
+		return
+	case v+v == v && v > 0:
+		printstring("+Inf")
+		return
+	case v+v == v && v < 0:
+		printstring("-Inf")
+		return
+	}
+
+	const n = 7 // digits printed
+	var buf [n + 7]byte
+	buf[0] = '+'
+	e := 0 // exp
+	if v == 0 {
+		if 1/v < 0 {
+			buf[0] = '-'
+		}
+	} else {
+		if v < 0 {
+			v = -v
+			buf[0] = '-'
+		}
+
+		// normalize
+		for v >= 10 {
+			e++
+			v /= 10
+		}
+		for v < 1 {
+			e--
+			v *= 10
+		}
+
+		// round
+		h := float32(5.0)
+		for i := 0; i < n; i++ {
+			h /= 10
+		}
+		v += h
+		if v >= 10 {
+			e++
+			v /= 10
+		}
+	}
+
+	// format +d.dddd+edd
+	for i := 0; i < n; i++ {
+		s := int(v)
+		buf[i+2] = byte(s + '0')
+		v -= float32(s)
+		v *= 10
+	}
+	buf[1] = buf[2]
+	buf[2] = '.'
+
+	buf[n+2] = 'e'
+	buf[n+3] = '+'
+	if e < 0 {
+		e = -e
+		buf[n+3] = '-'
+	}
+
+	buf[n+4] = byte(e/100) + '0'
+	buf[n+5] = byte(e/10)%10 + '0'
+	buf[n+6] = byte(e%10) + '0'
+	for _, c := range buf {
+		putchar(c)
+	}
 }
 
 // printfloat64() was copied from the relevant source in the original Go
@@ -197,81 +284,93 @@ func printspace() {
 }
 
 func printnl() {
-	putchar('\r')
+	if baremetal {
+		putchar('\r')
+	}
 	putchar('\n')
 }
 
 func printitf(msg interface{}) {
 	switch msg := msg.(type) {
 	case bool:
-		print(msg)
+		printbool(msg)
 	case int:
-		print(msg)
+		switch unsafe.Sizeof(msg) {
+		case 8:
+			printint64(int64(msg))
+		case 4:
+			printint32(int32(msg))
+		}
 	case int8:
-		print(msg)
+		printint8(msg)
 	case int16:
-		print(msg)
+		printint16(msg)
 	case int32:
-		print(msg)
+		printint32(msg)
 	case int64:
-		print(msg)
+		printint64(msg)
 	case uint:
-		print(msg)
+		switch unsafe.Sizeof(msg) {
+		case 8:
+			printuint64(uint64(msg))
+		case 4:
+			printuint32(uint32(msg))
+		}
 	case uint8:
-		print(msg)
+		printuint8(msg)
 	case uint16:
-		print(msg)
+		printuint16(msg)
 	case uint32:
-		print(msg)
+		printuint32(msg)
 	case uint64:
-		print(msg)
+		printuint64(msg)
 	case uintptr:
-		print(msg)
+		printuintptr(msg)
 	case float32:
-		print(msg)
+		printfloat32(msg)
 	case float64:
-		print(msg)
+		printfloat64(msg)
 	case complex64:
-		print(msg)
+		printcomplex64(msg)
 	case complex128:
-		print(msg)
+		printcomplex128(msg)
 	case string:
-		print(msg)
+		printstring(msg)
 	case error:
-		print(msg.Error())
+		printstring(msg.Error())
 	case stringer:
-		print(msg.String())
+		printstring(msg.String())
 	default:
 		// cast to underlying type
 		itf := *(*_interface)(unsafe.Pointer(&msg))
 		putchar('(')
-		switch unsafe.Sizeof(itf.typecode) {
-		case 2:
-			printuint16(uint16(itf.typecode))
-		case 4:
-			printuint32(uint32(itf.typecode))
-		case 8:
-			printuint64(uint64(itf.typecode))
-		}
+		printuintptr(uintptr(itf.typecode))
 		putchar(':')
-		print(itf.value)
+		printptr(uintptr(itf.value))
 		putchar(')')
 	}
 }
 
 func printmap(m *hashmap) {
-	print("map[")
+	printstring("map[")
 	if m == nil {
-		print("nil")
+		printstring("nil")
 	} else {
-		print(uint(m.count))
+		switch unsafe.Sizeof(m.count) {
+		case 8:
+			printuint64(uint64(m.count))
+		case 4:
+			printuint32(uint32(m.count))
+		case 2:
+			printuint16(uint16(m.count))
+		}
 	}
 	putchar(']')
 }
 
 func printptr(ptr uintptr) {
 	if ptr == 0 {
-		print("nil")
+		printstring("nil")
 		return
 	}
 	putchar('0')
@@ -293,4 +392,13 @@ func printbool(b bool) {
 	} else {
 		printstring("false")
 	}
+}
+
+func printslice(ptr, len_, cap_ uintptr) {
+	putchar('[')
+	printuintptr(len_)
+	putchar('/')
+	printuintptr(cap_)
+	putchar(']')
+	printptr(ptr)
 }

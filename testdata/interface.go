@@ -26,6 +26,9 @@ func main() {
 	println("Stringer.String():", s.String())
 	var itf interface{} = s
 	println("Stringer.(*Thing).String():", itf.(Stringer).String())
+	if s, ok := s.(interface{ String() string }); ok {
+		println("s has String() method:", s.String())
+	}
 
 	println("nested switch:", nestedSwitch('v', 3))
 
@@ -36,6 +39,9 @@ func main() {
 	// Test bugfix for assertion on named empty interface:
 	// https://github.com/tinygo-org/tinygo/issues/453
 	_, _ = itf.(Empty)
+
+	var v Byter = FooByte(3)
+	println("Byte(): ", v.Byte())
 
 	var n int
 	var f float32
@@ -87,6 +93,12 @@ func main() {
 			a int
 			b int
 		}{3, 6}},
+		{true, named1(), named1()},
+		{true, named2(), named2()},
+		{false, named1(), named2()},
+		{false, named2(), named3()},
+		{true, namedptr1(), namedptr1()},
+		{false, namedptr1(), namedptr2()},
 	}
 	for i, tc := range interfaceEqualTests {
 		if (tc.lhs == tc.rhs) != tc.equal {
@@ -101,6 +113,12 @@ func main() {
 	println("slept 1ms")
 	blockStatic(SleepBlocker(time.Millisecond))
 	println("slept 1ms")
+
+	// check that pointer-to-pointer type switches work
+	ptrptrswitch()
+
+	// check that type asserts to interfaces with no methods work
+	emptyintfcrash()
 }
 
 func printItf(val interface{}) {
@@ -136,6 +154,12 @@ func printItf(val interface{}) {
 		println("is ?")
 	}
 }
+
+var (
+	// Test for type assert support in the interp package.
+	globalThing interface{} = Foo(3)
+	_                       = globalThing.(Foo)
+)
 
 func nestedSwitch(verb rune, arg interface{}) bool {
 	switch verb {
@@ -257,3 +281,65 @@ type StaticBlocker interface {
 }
 
 type Empty interface{}
+
+type FooByte int
+
+func (f FooByte) Byte() byte { return byte(f) }
+
+type Byter interface {
+	Byte() uint8
+}
+
+// Make sure that named types inside functions do not alias with any other named
+// functions.
+
+type named int
+
+func named1() any {
+	return named(0)
+}
+
+func named2() any {
+	type named int
+	return named(0)
+}
+
+func named3() any {
+	type named int
+	return named(0)
+}
+
+func namedptr1() interface{} {
+	type Test int
+	return (*Test)(nil)
+}
+
+func namedptr2() interface{} {
+	type Test byte
+	return (*Test)(nil)
+}
+
+func ptrptrswitch() {
+	identify(0)
+	identify(new(int))
+	identify(new(*int))
+}
+
+func identify(itf any) {
+	switch itf.(type) {
+	case int:
+		println("type is int")
+	case *int:
+		println("type is *int")
+	case **int:
+		println("type is **int")
+	default:
+		println("other type??")
+	}
+}
+
+func emptyintfcrash() {
+	if x, ok := any(5).(any); ok {
+		println("x is", x.(int))
+	}
+}

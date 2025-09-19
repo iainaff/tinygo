@@ -1,22 +1,35 @@
 package interp
 
 import (
-	"io/ioutil"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"tinygo.org/x/go-llvm"
 )
 
 func TestInterp(t *testing.T) {
+	llvmVersion, err := strconv.Atoi(strings.Split(llvm.Version, ".")[0])
+	if err != nil {
+		// Note: this should never happen and if it does, it will always happen
+		// for a particular build because llvm.Version is a constant.
+		panic(err)
+	}
 	for _, name := range []string{
 		"basic",
+		"phi",
 		"slice-copy",
 		"consteval",
-		"map",
+		"interface",
+		"revert",
+		"alloc",
 	} {
-		name := name // make tc local to this closure
+		name := name // make local to this closure
+		if name == "slice-copy" && llvmVersion < 14 {
+			continue
+		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			runTest(t, "testdata/"+name)
@@ -27,6 +40,7 @@ func TestInterp(t *testing.T) {
 func runTest(t *testing.T, pathPrefix string) {
 	// Read the input IR.
 	ctx := llvm.NewContext()
+	defer ctx.Dispose()
 	buf, err := llvm.NewMemoryBufferFromFile(pathPrefix + ".ll")
 	os.Stat(pathPrefix + ".ll") // make sure this file is tracked by `go test` caching
 	if err != nil {
@@ -36,22 +50,39 @@ func runTest(t *testing.T, pathPrefix string) {
 	if err != nil {
 		t.Fatalf("could not load module:\n%v", err)
 	}
+	defer mod.Dispose()
 
 	// Perform the transform.
-	err = Run(mod, false)
+	err = Run(mod, 10*time.Minute, false)
 	if err != nil {
+		if err, match := err.(*Error); match {
+			println(err.Error())
+			if len(err.Inst) != 0 {
+				println(err.Inst)
+			}
+			if len(err.Traceback) > 0 {
+				println("\ntraceback:")
+				for _, line := range err.Traceback {
+					println(line.Pos.String() + ":")
+					println(line.Inst)
+				}
+			}
+		}
 		t.Fatal(err)
 	}
 
+	// To be sure, verify that the module is still valid.
+	if llvm.VerifyModule(mod, llvm.PrintMessageAction) != nil {
+		t.FailNow()
+	}
+
 	// Run some cleanup passes to get easy-to-read outputs.
-	pm := llvm.NewPassManager()
-	defer pm.Dispose()
-	pm.AddGlobalOptimizerPass()
-	pm.AddDeadStoreEliminationPass()
-	pm.Run(mod)
+	to := llvm.NewPassBuilderOptions()
+	defer to.Dispose()
+	mod.RunPasses("globalopt,dse,adce", llvm.TargetMachine{}, to)
 
 	// Read the expected output IR.
-	out, err := ioutil.ReadFile(pathPrefix + ".out.ll")
+	out, err := os.ReadFile(pathPrefix + ".out.ll")
 	if err != nil {
 		t.Fatalf("could not read output file %s: %v", pathPrefix+".out.ll", err)
 	}
@@ -74,8 +105,9 @@ func fuzzyEqualIR(s1, s2 string) bool {
 	if len(lines1) != len(lines2) {
 		return false
 	}
-	for i, line := range lines1 {
-		if line != lines2[i] {
+	for i, line1 := range lines1 {
+		line2 := lines2[i]
+		if line1 != line2 {
 			return false
 		}
 	}

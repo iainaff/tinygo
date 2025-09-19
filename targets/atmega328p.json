@@ -1,11 +1,8 @@
 {
 	"inherits": ["avr"],
-	"llvm-target": "avr-atmel-none",
 	"cpu": "atmega328p",
 	"build-tags": ["atmega328p", "atmega", "avr5"],
-	"cflags": [
-		"-mmcu=atmega328p"
-	],
+	"serial": "uart",
 	"linkerscript": "src/device/avr/atmega328p.ld",
 	"extra-files": [
 		"targets/avr.S",

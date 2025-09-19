@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <errno.h>
 
 typedef short myint;
 typedef short unusedTypedef;
@@ -9,6 +10,9 @@ typedef int (*binop_t) (int, int);
 int doCallback(int a, int b, binop_t cb);
 typedef int * intPointer;
 void store(int value, int *ptr);
+
+int variadic0();
+int variadic2(int x, int y, ...);
 
 # define CONST_INT 5
 # define CONST_INT2 5llu
@@ -134,6 +138,22 @@ extern int globalUnionSize;
 extern option_t globalOption;
 extern bitfield_t globalBitfield;
 
+extern int smallEnumWidth;
+
+extern int cflagsConstant;
+
+extern char globalChars[4];
+
 // test duplicate definitions
 int add(int a, int b);
 extern int global;
+
+// Test array decaying into a pointer.
+typedef int arraydecay_buf3[4][7][2];
+void arraydecay(int buf1[5], int buf2[3][8], arraydecay_buf3 buf3);
+
+double doSqrt(double);
+
+void printf_single_int(char *format, int arg);
+
+int set_errno(int err);

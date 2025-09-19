@@ -1,13 +1,9 @@
-// +build sam,atsamd51,pyportal
+//go:build pyportal
 
 package machine
 
-import (
-	"device/sam"
-)
-
 // used to reset into bootloader
-const RESET_MAGIC_VALUE = 0xf01669ef
+const resetMagicValue = 0xf01669ef
 
 // GPIO Pins
 const (
@@ -30,9 +26,9 @@ const (
 	D26 = PB09 // TFT_WR
 	D27 = PB02 // SDA
 	D28 = PB03 // SCL
-	D29 = PA12 // MOSI
+	D29 = PA12 // SDO
 	D30 = PA13 // SCK
-	D31 = PA14 // MISO
+	D31 = PA14 // SDI
 	D32 = PB30 // SD_CS
 	D33 = PA01 // SD_CARD_DETECT
 	D34 = PA16 // LCD_DATA0
@@ -57,9 +53,12 @@ const (
 	NINA_GPIO0  = D6
 	NINA_RESETN = D7
 
+	// pins used for the ESP32 connection do not allow hardware
+	// flow control, which is required. have to emulate with software.
 	NINA_TX  = D1
 	NINA_RX  = D0
-	NINA_RTS = D51
+	NINA_CTS = NINA_ACK
+	NINA_RTS = NINA_GPIO0
 
 	LCD_DATA0 = D34
 
@@ -72,6 +71,7 @@ const (
 	TFT_WR        = D26
 
 	NEOPIXEL = D2
+	WS2812   = D2
 	SPK_SD   = D50
 )
 
@@ -98,16 +98,31 @@ const (
 	LED = D13
 )
 
-// UART0 aka USBCDC pins
+// USBCDC pins
 const (
 	USBCDC_DM_PIN = PA24
 	USBCDC_DP_PIN = PA25
 )
 
-// TODO: add configuration for UART on SERCOM4 that is connected to TX/RX of ESP32
+// UART1 aka NINA_TX/NINA_RX
 const (
-	UART_TX_PIN = NoPin
-	UART_RX_PIN = NoPin
+	UART_TX_PIN = D1
+	UART_RX_PIN = D0
+)
+
+var (
+	UART1 = &sercomUSART4
+
+	DefaultUART = UART1
+
+	UART_NINA = UART1
+)
+
+// NINA-W102 settings
+const (
+	NINA_BAUDRATE         = 115200
+	NINA_RESET_INVERTED   = true
+	NINA_SOFT_FLOWCONTROL = true
 )
 
 // I2C pins
@@ -118,28 +133,33 @@ const (
 
 // I2C on the PyPortal.
 var (
-	I2C0 = I2C{
-		Bus:    sam.SERCOM5_I2CM,
-		SERCOM: 5,
-	}
+	I2C0 = sercomI2CM5
 )
 
 // SPI pins
 const (
-	SPI0_SCK_PIN  = PA13 // SCK: SERCOM1/PAD[1]
-	SPI0_MOSI_PIN = PA12 // MOSI: SERCOM1/PAD[3]
-	SPI0_MISO_PIN = PA14 // MISO: SERCOM1/PAD[2]
+	SPI0_SCK_PIN = PA13 // SCK: SERCOM1/PAD[1]
+	SPI0_SDO_PIN = PA12 // SDO: SERCOM1/PAD[3]
+	SPI0_SDI_PIN = PA14 // SDI: SERCOM1/PAD[2]
 
-	NINA_MOSI = SPI0_MOSI_PIN
-	NINA_MISO = SPI0_MISO_PIN
-	NINA_SCK  = SPI0_SCK_PIN
+	NINA_SDO = SPI0_SDO_PIN
+	NINA_SDI = SPI0_SDI_PIN
+	NINA_SCK = SPI0_SCK_PIN
 )
 
 // SPI on the PyPortal.
 var (
-	SPI0 = SPI{
-		Bus:    sam.SERCOM2_SPIM,
-		SERCOM: 2,
-	}
+	SPI0     = sercomSPIM2
 	NINA_SPI = SPI0
+)
+
+// USB CDC identifiers
+const (
+	usb_STRING_PRODUCT      = "Adafruit PyPortal M4"
+	usb_STRING_MANUFACTURER = "Adafruit"
+)
+
+var (
+	usb_VID uint16 = 0x239A
+	usb_PID uint16 = 0x8035
 )

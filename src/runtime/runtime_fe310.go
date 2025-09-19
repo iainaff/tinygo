@@ -1,4 +1,4 @@
-// +build fe310
+//go:build fe310
 
 // This file implements target-specific things for the FE310 chip as used in the
 // HiFive1.
@@ -14,28 +14,20 @@ import (
 	"runtime/volatile"
 )
 
-type timeUnit int64
-
-//go:extern _sbss
-var _sbss [0]byte
-
-//go:extern _ebss
-var _ebss [0]byte
-
-//go:extern _sdata
-var _sdata [0]byte
-
-//go:extern _sidata
-var _sidata [0]byte
-
-//go:extern _edata
-var _edata [0]byte
-
-//go:export main
+//export main
 func main() {
 	// Zero the PLIC enable bits on startup: they are not zeroed at reset.
 	sifive.PLIC.ENABLE[0].Set(0)
 	sifive.PLIC.ENABLE[1].Set(0)
+
+	// Zero the threshold value to allow all priorities of interrupts.
+	sifive.PLIC.THRESHOLD.Set(0)
+
+	// Zero MCAUSE, which is set to the reset reason on reset. It must be zeroed
+	// to make interrupt.In() work.
+	// This would also be a good time to save the reset reason, but that hasn't
+	// been implemented yet.
+	riscv.MCAUSE.Set(0)
 
 	// Set the interrupt address.
 	// Note that this address must be aligned specially, otherwise the MODE bits
@@ -44,16 +36,15 @@ func main() {
 
 	// Reset the MIE register and enable external interrupts.
 	// It must be reset here because it not zeroed at startup.
-	riscv.MIE.Set(1 << 11) // bit 11 is for machine external interrupts
+	riscv.MIE.Set(riscv.MIE_MEIE)
 
 	// Enable global interrupts now that they've been set up.
-	riscv.MSTATUS.SetBits(1 << 3) // MIE
+	riscv.MSTATUS.SetBits(riscv.MSTATUS_MIE) // MIE: machine external interrupts
 
 	preinit()
 	initPeripherals()
-	initAll()
-	callMain()
-	abort()
+	run()
+	exit(0)
 }
 
 //go:extern handleInterruptASM
@@ -66,17 +57,17 @@ func handleInterrupt() {
 	if cause&(1<<31) != 0 {
 		// Topmost bit is set, which means that it is an interrupt.
 		switch code {
-		case 7: // Machine timer interrupt
+		case riscv.MachineTimerInterrupt:
 			// Signal timeout.
 			timerWakeup.Set(1)
 			// Disable the timer, to avoid triggering the interrupt right after
 			// this interrupt returns.
-			riscv.MIE.ClearBits(1 << 7) // MTIE bit
-		case 11: // Machine external interrupt
+			riscv.MIE.ClearBits(riscv.MIE_MTIE)
+		case riscv.MachineExternalInterrupt:
 			// Claim this interrupt.
 			id := sifive.PLIC.CLAIM.Get()
 			// Call the interrupt handler, if any is registered for this ID.
-			callInterruptHandler(int(id))
+			sifive.HandleInterrupt(int(id))
 			// Complete this interrupt.
 			sifive.PLIC.CLAIM.Set(id)
 		}
@@ -86,16 +77,20 @@ func handleInterrupt() {
 		// misaligned loads). However, for now we'll just print a fatal error.
 		handleException(code)
 	}
+
+	// Zero MCAUSE so that it can later be used to see whether we're in an
+	// interrupt or not.
+	riscv.MCAUSE.Set(0)
 }
 
-// initPeripherals configures periperhals the way the runtime expects them.
+// initPeripherals configures peripherals the way the runtime expects them.
 func initPeripherals() {
-	// Make sure the HFROSC is on
-	sifive.PRCI.HFROSCCFG.SetBits(sifive.PRCI_HFROSCCFG_ENABLE)
-
-	// Run off 16 MHz Crystal for accuracy.
-	sifive.PRCI.PLLCFG.SetBits(sifive.PRCI_PLLCFG_REFSEL | sifive.PRCI_PLLCFG_BYPASS)
-	sifive.PRCI.PLLCFG.SetBits(sifive.PRCI_PLLCFG_SEL)
+	// Configure PLL to output 320MHz.
+	//   R=2:  divide 16MHz to 8MHz
+	//   F=80: multiply 8MHz by 80 to get 640MHz (80/2-1=39)
+	//   Q=2:  divide 640MHz by 2 to get 320MHz
+	// This makes the main CPU run at 320MHz.
+	sifive.PRCI.PLLCFG.Set(sifive.PRCI_PLLCFG_PLLR_R2<<sifive.PRCI_PLLCFG_PLLR_Pos | 39<<sifive.PRCI_PLLCFG_PLLF_Pos | sifive.PRCI_PLLCFG_PLLQ_Q2<<sifive.PRCI_PLLCFG_PLLQ_Pos | sifive.PRCI_PLLCFG_SEL | sifive.PRCI_PLLCFG_REFSEL)
 
 	// Turn off HFROSC to save power
 	sifive.PRCI.HFROSCCFG.ClearBits(sifive.PRCI_HFROSCCFG_ENABLE)
@@ -104,32 +99,24 @@ func initPeripherals() {
 	sifive.RTC.RTCCFG.Set(sifive.RTC_RTCCFG_ENALWAYS)
 
 	// Configure the UART.
-	machine.UART0.Configure(machine.UARTConfig{})
-}
-
-func preinit() {
-	// Initialize .bss: zero-initialized global variables.
-	ptr := unsafe.Pointer(&_sbss)
-	for ptr != unsafe.Pointer(&_ebss) {
-		*(*uint32)(ptr) = 0
-		ptr = unsafe.Pointer(uintptr(ptr) + 4)
-	}
-
-	// Initialize .data: global variables initialized from flash.
-	src := unsafe.Pointer(&_sidata)
-	dst := unsafe.Pointer(&_sdata)
-	for dst != unsafe.Pointer(&_edata) {
-		*(*uint32)(dst) = *(*uint32)(src)
-		dst = unsafe.Pointer(uintptr(dst) + 4)
-		src = unsafe.Pointer(uintptr(src) + 4)
-	}
+	machine.InitSerial()
 }
 
 func putchar(c byte) {
-	machine.UART0.WriteByte(c)
+	machine.Serial.WriteByte(c)
 }
 
-const asyncScheduler = false
+func getchar() byte {
+	for machine.Serial.Buffered() == 0 {
+		Gosched()
+	}
+	v, _ := machine.Serial.ReadByte()
+	return v
+}
+
+func buffered() int {
+	return machine.Serial.Buffered()
+}
 
 var timerWakeup volatile.Register8
 
@@ -154,7 +141,7 @@ func sleepTicks(d timeUnit) {
 	target := uint64(ticks() + d)
 	sifive.CLINT.MTIMECMPH.Set(uint32(target >> 32))
 	sifive.CLINT.MTIMECMP.Set(uint32(target))
-	riscv.MIE.SetBits(1 << 7) // MTIE
+	riscv.MIE.SetBits(riscv.MIE_MTIE)
 	for {
 		if timerWakeup.Get() != 0 {
 			timerWakeup.Set(0)
@@ -178,7 +165,3 @@ func handleException(code uint) {
 	println()
 	abort()
 }
-
-// callInterruptHandler is a compiler-generated function that calls the
-// appropriate interrupt handler for the given interrupt ID.
-func callInterruptHandler(id int)

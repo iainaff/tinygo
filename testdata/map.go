@@ -1,5 +1,10 @@
 package main
 
+import (
+	"sort"
+	"unsafe"
+)
+
 var testmap1 = map[string]int{"data": 3}
 var testmap2 = map[string]int{
 	"one":    1,
@@ -44,9 +49,18 @@ func main() {
 	var nilmap map[string]int
 	println(m == nil, m != nil, len(m))
 	println(nilmap == nil, nilmap != nil, len(nilmap))
+	delete(nilmap, "foo")
+	println("nilmap:", nilmap["bar"])
 	println(testmapIntInt[2])
 	testmapIntInt[2] = 42
 	println(testmapIntInt[2])
+	for k := range nilmap {
+		println(k) // unreachable
+	}
+
+	var nilbinmap map[uint16]int
+	delete(nilbinmap, 4)
+	println("nilbinmap:", nilbinmap[5])
 
 	arrKey := ArrayKey([4]byte{4, 3, 2, 1})
 	println(testMapArrayKey[arrKey])
@@ -71,15 +85,24 @@ func main() {
 	println("itfMap[true]:", itfMap[true])
 	delete(itfMap, 8)
 	println("itfMap[8]:", itfMap[8])
+	for key, value := range itfMap {
+		if key == "eight" {
+			println("itfMap: found key \"eight\":", value)
+		}
+	}
 
 	// test map with float keys
 	floatMap := map[float32]int{
-		42: 84,
+		42:   84,
+		3.14: 6,
 	}
 	println("floatMap[42]:", floatMap[42])
 	println("floatMap[43]:", floatMap[43])
 	delete(floatMap, 42)
 	println("floatMap[42]:", floatMap[42])
+	for k, v := range floatMap {
+		println("floatMap key, value:", k, v)
+	}
 
 	// test maps with struct keys
 	structMap := map[namedFloat]int{
@@ -102,12 +125,64 @@ func main() {
 	squares = make(map[int]int, 20)
 	testBigMap(squares, 40)
 	println("tested growing of a map")
+
+	floatcmplx()
+
+	mapgrow()
+
+	interfacerehash()
+}
+
+func floatcmplx() {
+
+	var zero float64
+	var negz float64 = -zero
+
+	// test that zero and negative zero hash to the same thing
+	m := make(map[float64]int)
+	m[zero]++
+	m[negz]++
+	println(m[negz])
+
+	cmap := make(map[complex128]int)
+
+	var c complex128
+	c = complex(zero, zero)
+	cmap[c]++
+
+	c = complex(negz, negz)
+	cmap[c]++
+
+	c = complex(0, 0)
+	println(cmap[c])
+
+	c = complex(1, negz)
+	cmap[c]++
+
+	c = complex(1, zero)
+	cmap[c]++
+
+	println(cmap[c])
+
+	c = complex(negz, 2)
+	cmap[c]++
+
+	c = complex(zero, 2)
+	cmap[c]++
+
+	println(cmap[c])
 }
 
 func readMap(m map[string]int, key string) {
 	println("map length:", len(m))
 	println("map read:", key, "=", m[key])
-	for k, v := range m {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := m[k]
 		println(" ", k, "=", v)
 	}
 }
@@ -133,5 +208,103 @@ func testBigMap(squares map[int]int, n int) {
 				return
 			}
 		}
+	}
+}
+
+func mapgrow() {
+	m := make(map[int]int)
+
+	var Delete = 500
+	if unsafe.Sizeof(uintptr(0)) < 4 {
+		// Reduce the number of iterations on low-memory devices like AVR.
+		Delete = 20
+	}
+	var N = Delete * 2
+
+	for i := 0; i < Delete; i++ {
+		m[i] = i
+	}
+
+	var deleted bool
+	for k, v := range m {
+		if k == 0 {
+			// grow map
+			for i := Delete; i < N; i++ {
+				m[i] = i
+			}
+
+			// delete some elements
+			for i := 0; i < Delete; i++ {
+				delete(m, i)
+			}
+			deleted = true
+			continue
+		}
+
+		// make sure we never see a deleted element later in our iteration
+		if deleted && v < Delete {
+			println("saw deleted element", v)
+		}
+	}
+
+	if len(m) != N-Delete {
+		println("bad length post grow/delete", len(m))
+	}
+
+	seen := make([]bool, Delete)
+
+	var mcount int
+	for k, v := range m {
+		if k != v {
+			println("element mismatch", k, v)
+		}
+		if k < Delete {
+			println("saw deleted element post-grow", k)
+		}
+		seen[v-Delete] = true
+		mcount++
+	}
+
+	for _, v := range seen {
+		if !v {
+			println("missing key", v)
+		}
+	}
+
+	if mcount != N-Delete {
+		println("bad number of elements post-grow:", mcount)
+	}
+	println("done")
+}
+
+type Counter interface {
+	count() int
+}
+
+type counter struct {
+	i int
+}
+
+func (c *counter) count() int {
+	return c.i
+}
+
+func interfacerehash() {
+	m := make(map[Counter]int)
+
+	for i := 0; i < 20; i++ {
+		c := &counter{i}
+		m[c] = i
+	}
+
+	var failures int
+	for k, v := range m {
+		if got := m[k]; got != v {
+			println("lookup failure got", got, "want", v)
+			failures++
+		}
+	}
+	if failures == 0 {
+		println("no interface lookup failures")
 	}
 }

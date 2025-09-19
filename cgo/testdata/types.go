@@ -107,7 +107,15 @@ typedef struct {
 */
 import "C"
 
+// // Test that we can refer from this CGo fragment to the fragment above.
+// typedef myint myint2;
+import "C"
+
 var (
+	// aliases
+	_ C.float
+	_ C.double
+
 	// Simple typedefs.
 	_ C.myint
 

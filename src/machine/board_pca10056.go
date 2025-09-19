@@ -1,4 +1,4 @@
-// +build pca10056
+//go:build pca10056
 
 package machine
 
@@ -6,21 +6,23 @@ const HasLowFrequencyCrystal = true
 
 // LEDs on the pca10056
 const (
-	LED  Pin = LED1
 	LED1 Pin = 13
 	LED2 Pin = 14
 	LED3 Pin = 15
 	LED4 Pin = 16
+	LED  Pin = LED1
 )
 
 // Buttons on the pca10056
 const (
-	BUTTON  Pin = BUTTON1
 	BUTTON1 Pin = 11
 	BUTTON2 Pin = 12
 	BUTTON3 Pin = 24
 	BUTTON4 Pin = 25
+	BUTTON  Pin = BUTTON1
 )
+
+var DefaultUART = UART0
 
 // UART pins
 const (
@@ -46,7 +48,18 @@ const (
 
 // SPI pins
 const (
-	SPI0_SCK_PIN  Pin = 47 // P1.15
-	SPI0_MOSI_PIN Pin = 45 // P1.13
-	SPI0_MISO_PIN Pin = 46 // P1.14
+	SPI0_SCK_PIN Pin = 47 // P1.15
+	SPI0_SDO_PIN Pin = 45 // P1.13
+	SPI0_SDI_PIN Pin = 46 // P1.14
+)
+
+// USB CDC identifiers
+const (
+	usb_STRING_PRODUCT      = "Nordic nRF52840DK (PCA10056)"
+	usb_STRING_MANUFACTURER = "Nordic Semiconductor"
+)
+
+var (
+	usb_VID uint16 = 0x239A
+	usb_PID uint16 = 0x8029
 )

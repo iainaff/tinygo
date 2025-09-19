@@ -29,11 +29,20 @@ func main() {
 	// print float64
 	println(3.14)
 
+	// print float32
+	println(float32(3.14))
+
 	// print complex128
 	println(5 + 1.2345i)
 
 	// print interface
 	println(interface{}(nil))
+	println(interface{}(true))
+	println(interface{}("foobar"))
+	println(interface{}(int64(-3)))
+	println(interface{}(uint64(3)))
+	println(interface{}(int(-3)))
+	println(interface{}(uint(3)))
 
 	// print map
 	println(map[string]int{"three": 3, "five": 5})
@@ -42,4 +51,8 @@ func main() {
 
 	// print bool
 	println(true, false)
+
+	// print slice
+	println([]byte(nil))
+	println([]int(nil))
 }

@@ -10,12 +10,16 @@ This guide describes how to statically link TinyGo against LLVM, libclang and
 lld so that the binary can be easily moved between systems. It also shows how to
 build a release tarball that includes this binary and all necessary extra files.
 
+**Note**: this documentation describes how to build a statically linked release
+tarball. If you want to help with development of TinyGo itself, you should follow the guide located at https://tinygo.org/docs/guides/build/
+
 ## Dependencies
 
 LLVM, Clang and LLD are quite light on dependencies, requiring only standard
 build tools to be built. Go is of course necessary to build TinyGo itself.
 
-  * Go (1.11+)
+  * Go (1.19+)
+  * GNU Make
   * Standard build tools (gcc/clang)
   * git
   * CMake
@@ -23,6 +27,21 @@ build tools to be built. Go is of course necessary to build TinyGo itself.
 
 The rest of this guide assumes you're running Linux, but it should be equivalent
 on a different system like Mac.
+
+## Using GNU Make
+
+The static build of TinyGo is driven by GNUmakefile, which provides a help target for quick reference:
+
+    % make help
+    clean                           Remove build directory
+    fmt                             Reformat source
+    fmt-check                       Warn if any source needs reformatting
+    gen-device                      Generate microcontroller-specific sources
+    llvm-source                     Get LLVM sources
+    llvm-build                      Build LLVM
+    tinygo                          Build the TinyGo compiler
+    lint                            Lint source tree
+    spell                           Spellcheck source tree
 
 ## Download the source
 
@@ -34,11 +53,6 @@ the git repository). Then, inside the directory, download the LLVM source:
 You can also store LLVM outside of the TinyGo root directory by setting the
 `LLVM_BUILDDIR`, `CLANG_SRC` and `LLD_SRC` make variables, but that is not
 covered by this guide.
-
-TinyGo uses Go modules, so if you clone TinyGo inside your GOPATH (and are using
-Go below 1.13), make sure that Go modules are enabled:
-
-    export GO111MODULE=on
 
 ## Build LLVM, Clang, LLD
 
@@ -71,10 +85,16 @@ Try running TinyGo:
 
     ./build/tinygo help
 
-Also, make sure the `tinygo` binary really is statically linked. Check this
-using `ldd` (not to be confused with `lld`):
+Also, make sure the `tinygo` binary really is statically linked. The command to check for 
+dynamic dependencies differs depending on your operating system.
+
+On Linux, use `ldd` (not to be confused with `lld`):
 
     ldd ./build/tinygo
+
+On macOS, use otool -L:
+
+    otool -L ./build/tinygo
 
 The result should not contain libclang or libLLVM.
 
@@ -83,6 +103,10 @@ The result should not contain libclang or libLLVM.
 Now that we have a working static build, it's time to make a release tarball:
 
     make release
+
+If you did not clone the repository with the `--recursive` option, you will get errors until you initialize the project submodules:
+
+    git submodule update --init
 
 The release tarball is stored in build/release.tar.gz, and can be extracted with
 the following command (for example in ~/lib):

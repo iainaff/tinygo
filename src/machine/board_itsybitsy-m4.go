@@ -1,11 +1,9 @@
-// +build sam,atsamd51,itsybitsy_m4
+//go:build itsybitsy_m4
 
 package machine
 
-import "device/sam"
-
 // used to reset into bootloader
-const RESET_MAGIC_VALUE = 0xf01669ef
+const resetMagicValue = 0xf01669ef
 
 // GPIO Pins
 const (
@@ -39,7 +37,7 @@ const (
 	LED = D13
 )
 
-// UART0 aka USBCDC pins
+// USBCDC pins
 const (
 	USBCDC_DM_PIN = PA24
 	USBCDC_DP_PIN = PA25
@@ -51,15 +49,17 @@ const (
 	UART_RX_PIN = D0
 )
 
-// UART1 var is on SERCOM3, defined in atsamd51.go
-
-// UART2 pins
 const (
 	UART2_TX_PIN = A4
 	UART2_RX_PIN = D2
 )
 
-// UART2 var is on SERCOM0, defined in atsamd51.go
+var (
+	UART1 = &sercomUSART3
+	UART2 = &sercomUSART0
+
+	DefaultUART = UART1
+)
 
 // I2C pins
 const (
@@ -69,23 +69,26 @@ const (
 
 // I2C on the ItsyBitsy M4.
 var (
-	I2C0 = I2C{
-		Bus:    sam.SERCOM2_I2CM,
-		SERCOM: 2,
-	}
+	I2C0 = sercomI2CM2
 )
 
 // SPI pins
 const (
-	SPI0_SCK_PIN  = PA01 // SCK: SERCOM1/PAD[1]
-	SPI0_MOSI_PIN = PA00 // MOSI: SERCOM1/PAD[0]
-	SPI0_MISO_PIN = PB23 // MISO: SERCOM1/PAD[3]
+	SPI0_SCK_PIN = PA01 // SCK: SERCOM1/PAD[1]
+	SPI0_SDO_PIN = PA00 // SDO: SERCOM1/PAD[0]
+	SPI0_SDI_PIN = PB23 // SDI: SERCOM1/PAD[3]
 )
 
 // SPI on the ItsyBitsy M4.
+var SPI0 = sercomSPIM1
+
+// USB CDC identifiers
+const (
+	usb_STRING_PRODUCT      = "Adafruit ItsyBitsy M4"
+	usb_STRING_MANUFACTURER = "Adafruit"
+)
+
 var (
-	SPI0 = SPI{
-		Bus:    sam.SERCOM1_SPIM,
-		SERCOM: 1,
-	}
+	usb_VID uint16 = 0x239A
+	usb_PID uint16 = 0x802B
 )

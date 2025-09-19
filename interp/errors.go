@@ -11,57 +11,59 @@ import (
 	"tinygo.org/x/go-llvm"
 )
 
-// errUnreachable is returned when an unreachable instruction is executed. This
-// error should not be visible outside of the interp package.
-var errUnreachable = errors.New("interp: unreachable executed")
+// These errors are expected during normal execution and can be recovered from
+// by running the affected function at runtime instead of compile time.
+var (
+	errIntegerAsPointer       = errors.New("interp: trying to use an integer as a pointer (memory-mapped I/O?)")
+	errUnsupportedInst        = errors.New("interp: unsupported instruction")
+	errUnsupportedRuntimeInst = errors.New("interp: unsupported instruction (to be emitted at runtime)")
+	errMapAlreadyCreated      = errors.New("interp: map already created")
+	errLoopUnrolled           = errors.New("interp: loop unrolled")
+)
 
-// Unsupported is the specific error that is returned when an unsupported
-// instruction is hit while trying to interpret all initializers.
-type Unsupported struct {
-	ImportPath string
-	Inst       llvm.Value
-	Pos        token.Position
+// This is one of the errors that can be returned from toLLVMValue when the
+// passed type does not fit the data to serialize. It is recoverable by
+// serializing without a type (using rawValue.rawLLVMValue).
+var errInvalidPtrToIntSize = errors.New("interp: ptrtoint integer size does not equal pointer size")
+
+func isRecoverableError(err error) bool {
+	return err == errIntegerAsPointer || err == errUnsupportedInst ||
+		err == errUnsupportedRuntimeInst || err == errMapAlreadyCreated ||
+		err == errLoopUnrolled
 }
 
-func (e Unsupported) Error() string {
-	// TODO: how to return the actual instruction string?
-	// It looks like LLVM provides no function for that...
-	return scanner.Error{
-		Pos: e.Pos,
-		Msg: "interp: unsupported instruction",
-	}.Error()
-}
-
-// unsupportedInstructionError returns a new "unsupported instruction" error for
-// the given instruction. It includes source location information, when
-// available.
-func (e *evalPackage) unsupportedInstructionError(inst llvm.Value) *Unsupported {
-	return &Unsupported{
-		ImportPath: e.packagePath,
-		Inst:       inst,
-		Pos:        getPosition(inst),
-	}
+// ErrorLine is one line in a traceback. The position may be missing.
+type ErrorLine struct {
+	Pos  token.Position
+	Inst string
 }
 
 // Error encapsulates compile-time interpretation errors with an associated
 // import path. The errors may not have a precise location attached.
 type Error struct {
 	ImportPath string
-	Errs       []scanner.Error
+	Inst       string
+	Pos        token.Position
+	Err        error
+	Traceback  []ErrorLine
 }
 
 // Error returns the string of the first error in the list of errors.
-func (e Error) Error() string {
-	return e.Errs[0].Error()
+func (e *Error) Error() string {
+	return e.Pos.String() + ": " + e.Err.Error()
 }
 
 // errorAt returns an error value for the currently interpreted package at the
 // location of the instruction. The location information may not be complete as
 // it depends on debug information in the IR.
-func (e *evalPackage) errorAt(inst llvm.Value, msg string) Error {
-	return Error{
-		ImportPath: e.packagePath,
-		Errs:       []scanner.Error{errorAt(inst, msg)},
+func (r *runner) errorAt(inst instruction, err error) *Error {
+	pos := getPosition(inst.llvmInst)
+	return &Error{
+		ImportPath: r.pkgName,
+		Inst:       inst.llvmInst.String(),
+		Pos:        pos,
+		Err:        err,
+		Traceback:  []ErrorLine{{pos, inst.llvmInst.String()}},
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,66 +25,105 @@ type AVRToolsDeviceFile struct {
 			Name           string `xml:"name,attr"`
 			Size           string `xml:"size,attr"`
 			MemorySegments []struct {
-				Name string `xml:"name,attr"`
-				Size string `xml:"size,attr"`
+				Name  string `xml:"name,attr"`
+				Start string `xml:"start,attr"`
+				Size  string `xml:"size,attr"`
 			} `xml:"memory-segment"`
 		} `xml:"address-spaces>address-space"`
-		Interrupts []Interrupt `xml:"interrupts>interrupt"`
+		PeripheralInstances []struct {
+			Name          string `xml:"name,attr"`
+			Caption       string `xml:"caption,attr"`
+			RegisterGroup struct {
+				NameInModule string `xml:"name-in-module,attr"`
+				Offset       string `xml:"offset,attr"`
+			} `xml:"register-group"`
+		} `xml:"peripherals>module>instance"`
+		Interrupts []*XMLInterrupt `xml:"interrupts>interrupt"`
 	} `xml:"devices>device"`
-	Modules []struct {
-		Name          string `xml:"name,attr"`
-		Caption       string `xml:"caption,attr"`
-		RegisterGroup struct {
+	PeripheralRegisterGroups []struct {
+		Name      string `xml:"name,attr"`
+		Caption   string `xml:"caption,attr"`
+		Registers []struct {
 			Name      string `xml:"name,attr"`
 			Caption   string `xml:"caption,attr"`
-			Registers []struct {
-				Name      string `xml:"name,attr"`
-				Caption   string `xml:"caption,attr"`
-				Offset    string `xml:"offset,attr"`
-				Size      int    `xml:"size,attr"`
-				Bitfields []struct {
-					Name    string `xml:"name,attr"`
-					Caption string `xml:"caption,attr"`
-					Mask    string `xml:"mask,attr"`
-				} `xml:"bitfield"`
-			} `xml:"register"`
-		} `xml:"register-group"`
-	} `xml:"modules>module"`
+			Offset    string `xml:"offset,attr"`
+			Size      uint64 `xml:"size,attr"`
+			Bitfields []struct {
+				Name    string `xml:"name,attr"`
+				Caption string `xml:"caption,attr"`
+				Mask    string `xml:"mask,attr"`
+			} `xml:"bitfield"`
+		} `xml:"register"`
+	} `xml:"modules>module>register-group"`
+}
+
+type XMLInterrupt struct {
+	Index    int    `xml:"index,attr"`
+	Name     string `xml:"name,attr"`
+	Instance string `xml:"module-instance,attr"`
+	Caption  string `xml:"caption,attr"`
 }
 
 type Device struct {
-	metadata    map[string]interface{}
-	interrupts  []Interrupt
-	peripherals []*Peripheral
+	metadata   map[string]interface{}
+	interrupts []Interrupt
+	types      []*PeripheralType
+	instances  []*PeripheralInstance
+	oldStyle   bool
 }
 
+// AddressSpace is the Go version of an XML element like the following:
+//
+//	<address-space endianness="little" name="data" id="data" start="0x0000" size="0x0900">
+//
+// It describes one address space in an AVR microcontroller. One address space
+// may have multiple memory segments.
 type AddressSpace struct {
 	Size     string
-	Segments map[string]int
+	Segments map[string]MemorySegment
+}
+
+// MemorySegment is the Go version of an XML element like the following:
+//
+//	<memory-segment name="IRAM" start="0x0100" size="0x0800" type="ram" external="false"/>
+//
+// It describes a single contiguous area of memory in a particular address space
+// (see AddressSpace).
+type MemorySegment struct {
+	start int64
+	size  int64
 }
 
 type Interrupt struct {
-	Index   int    `xml:"index,attr"`
-	Name    string `xml:"name,attr"`
-	Caption string `xml:"caption,attr"`
+	Index   int
+	Name    string
+	Caption string
 }
 
-type Peripheral struct {
+// Peripheral instance, for example PORTB
+type PeripheralInstance struct {
+	Name    string
+	Caption string
+	Address uint64
+	Type    *PeripheralType
+}
+
+// Peripheral type, for example PORT (if it's shared between different
+// instances, which is the case for new-style ATDF files).
+type PeripheralType struct {
 	Name      string
 	Caption   string
 	Registers []*Register
+	Instances []*PeripheralInstance
 }
 
+// Single register or struct field in a peripheral type.
 type Register struct {
-	Caption    string
-	Variants   []RegisterVariant
-	Bitfields  []Bitfield
-	peripheral *Peripheral
-}
-
-type RegisterVariant struct {
-	Name    string
-	Address int64
+	Caption   string
+	Name      string
+	Type      string
+	Offset    uint64 // offset, only for old-style ATDF files
+	Bitfields []Bitfield
 }
 
 type Bitfield struct {
@@ -115,100 +155,190 @@ func readATDF(path string) (*Device, error) {
 	for _, el := range device.AddressSpaces {
 		memorySizes[el.Name] = &AddressSpace{
 			Size:     el.Size,
-			Segments: make(map[string]int),
+			Segments: make(map[string]MemorySegment),
 		}
 		for _, segmentEl := range el.MemorySegments {
+			start, err := strconv.ParseInt(segmentEl.Start, 0, 32)
+			if err != nil {
+				return nil, err
+			}
 			size, err := strconv.ParseInt(segmentEl.Size, 0, 32)
 			if err != nil {
 				return nil, err
 			}
-			memorySizes[el.Name].Segments[segmentEl.Name] = int(size)
+			memorySizes[el.Name].Segments[segmentEl.Name] = MemorySegment{
+				start: start,
+				size:  size,
+			}
 		}
 	}
 
-	allRegisters := map[string]*Register{}
-
-	var peripherals []*Peripheral
-	for _, el := range xml.Modules {
-		peripheral := &Peripheral{
-			Name:    el.Name,
-			Caption: el.Caption,
+	// There appear to be two kinds of devices and ATDF files: those before
+	// ~2017 and those introduced as part of the tinyAVR (1 and 2 series).
+	// The newer devices are structured slightly differently, with peripherals
+	// laid out more like Cortex-M chips and one or more instances per chip.
+	// Older designs basically just have a bunch of registers with little
+	// structure in them.
+	// The code generated for these chips is quite different:
+	//   * For old-style chips we'll generate a bunch of registers without
+	//     peripherals (e.g. PORTB, DDRB, etc).
+	//   * For new-style chips we'll generate proper peripheral structs like we
+	//     do for Cortex-M chips.
+	oldStyle := true
+	for _, instanceEl := range device.PeripheralInstances {
+		if instanceEl.RegisterGroup.NameInModule == "" {
+			continue
 		}
-		peripherals = append(peripherals, peripheral)
+		offset, err := strconv.ParseUint(instanceEl.RegisterGroup.Offset, 0, 16)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse offset %#v of peripheral %s: %v", instanceEl.RegisterGroup.Offset, instanceEl.Name, err)
+		}
+		if offset != 0 {
+			oldStyle = false
+		}
+	}
 
-		regElGroup := el.RegisterGroup
-		for _, regEl := range regElGroup.Registers {
-			regOffset, err := strconv.ParseInt(regEl.Offset, 0, 64)
+	// Read all peripheral types.
+	var types []*PeripheralType
+	typeMap := make(map[string]*PeripheralType)
+	allRegisters := map[string]*Register{}
+	for _, registerGroupEl := range xml.PeripheralRegisterGroups {
+		var regs []*Register
+		regEls := registerGroupEl.Registers
+		if !oldStyle {
+			// We only need to sort registers when we're generating peripheral
+			// structs.
+			sort.SliceStable(regEls, func(i, j int) bool {
+				return regEls[i].Offset < regEls[j].Offset
+			})
+		}
+		addReg := func(reg *Register) {
+			if oldStyle {
+				// Check for duplicate registers (they happen).
+				if reg2 := allRegisters[reg.Name]; reg2 != nil {
+					return
+				}
+				allRegisters[reg.Name] = reg
+			}
+			regs = append(regs, reg)
+		}
+		offset := uint64(0)
+		for _, regEl := range regEls {
+			regOffset, err := strconv.ParseUint(regEl.Offset, 0, 64)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse offset %#v of register %s: %v", regEl.Offset, regEl.Name, err)
 			}
-			reg := &Register{
-				Caption:    regEl.Caption,
-				peripheral: peripheral,
-			}
-			switch regEl.Size {
-			case 1:
-				reg.Variants = []RegisterVariant{
-					{
-						Name:    regEl.Name,
-						Address: regOffset,
-					},
+			if !oldStyle {
+				// Add some padding to the gap in the struct, if needed.
+				if offset < regOffset {
+					regs = append(regs, &Register{
+						Name: "_",
+						Type: fmt.Sprintf("[%d]volatile.Register8", regOffset-offset),
+					})
+					offset = regOffset
 				}
-			case 2:
-				reg.Variants = []RegisterVariant{
-					{
-						Name:    regEl.Name + "L",
-						Address: regOffset,
-					},
-					{
-						Name:    regEl.Name + "H",
-						Address: regOffset + 1,
-					},
+
+				// Check for overlapping registers.
+				if offset > regOffset {
+					return nil, fmt.Errorf("register %s in peripheral %s overlaps with another register", regEl.Name, registerGroupEl.Name)
 				}
-			default:
-				// TODO
-				continue
 			}
 
+			var bitfields []Bitfield
 			for _, bitfieldEl := range regEl.Bitfields {
-				mask := bitfieldEl.Mask
-				if len(mask) == 2 {
+				maskString := bitfieldEl.Mask
+				if len(maskString) == 2 {
 					// Two devices (ATtiny102 and ATtiny104) appear to have an
 					// error in the bitfields, leaving out the '0x' prefix.
-					mask = "0x" + mask
+					maskString = "0x" + maskString
 				}
-				maskInt, err := strconv.ParseUint(mask, 0, 32)
+				mask, err := strconv.ParseUint(maskString, 0, 32)
 				if err != nil {
-					return nil, fmt.Errorf("failed to parse mask %#v of bitfield %s: %v", mask, bitfieldEl.Name, err)
+					return nil, fmt.Errorf("failed to parse mask %#v of bitfield %s: %v", maskString, bitfieldEl.Name, err)
 				}
-				reg.Bitfields = append(reg.Bitfields, Bitfield{
-					Name:    regEl.Name + "_" + bitfieldEl.Name,
+				name := regEl.Name + "_" + bitfieldEl.Name
+				if !oldStyle {
+					name = registerGroupEl.Name + "_" + name
+				}
+				bitfields = append(bitfields, Bitfield{
+					Name:    name,
 					Caption: bitfieldEl.Caption,
-					Mask:    uint(maskInt),
+					Mask:    uint(mask),
 				})
 			}
 
-			if _, ok := allRegisters[regEl.Name]; ok {
-				firstReg := allRegisters[regEl.Name]
-				for i := 0; i < len(firstReg.peripheral.Registers); i++ {
-					if firstReg.peripheral.Registers[i] == firstReg {
-						firstReg.peripheral.Registers = append(firstReg.peripheral.Registers[:i], firstReg.peripheral.Registers[i+1:]...)
-						break
-					}
-				}
-				continue
-			} else {
-				allRegisters[regEl.Name] = reg
+			switch regEl.Size {
+			case 1:
+				addReg(&Register{
+					Name:      regEl.Name,
+					Type:      "volatile.Register8",
+					Caption:   regEl.Caption,
+					Offset:    regOffset,
+					Bitfields: bitfields,
+				})
+			case 2:
+				addReg(&Register{
+					Name:    regEl.Name + "L",
+					Type:    "volatile.Register8",
+					Caption: regEl.Caption + " (lower bits)",
+					Offset:  regOffset + 0,
+				})
+				addReg(&Register{
+					Name:    regEl.Name + "H",
+					Type:    "volatile.Register8",
+					Caption: regEl.Caption + " (upper bits)",
+					Offset:  regOffset + 1,
+				})
+			default:
+				panic("todo: unknown size")
 			}
+			offset += regEl.Size
+		}
+		periphType := &PeripheralType{
+			Name:      registerGroupEl.Name,
+			Caption:   registerGroupEl.Caption,
+			Registers: regs,
+		}
+		types = append(types, periphType)
+		typeMap[periphType.Name] = periphType
+	}
 
-			peripheral.Registers = append(peripheral.Registers, reg)
+	// Read all peripheral instances.
+	var instances []*PeripheralInstance
+	for _, instanceEl := range device.PeripheralInstances {
+		if instanceEl.RegisterGroup.NameInModule == "" {
+			continue
+		}
+		offset, err := strconv.ParseUint(instanceEl.RegisterGroup.Offset, 0, 16)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse offset %#v of peripheral %s: %v", instanceEl.RegisterGroup.Offset, instanceEl.Name, err)
+		}
+		periphType := typeMap[instanceEl.RegisterGroup.NameInModule]
+		instance := &PeripheralInstance{
+			Name:    instanceEl.Name,
+			Caption: instanceEl.Caption,
+			Address: offset,
+			Type:    periphType,
+		}
+		instances = append(instances, instance)
+		periphType.Instances = append(periphType.Instances, instance)
+	}
+
+	ramStart := int64(0)
+	ramSize := int64(0) // for devices with no RAM
+	for _, ramSegmentName := range []string{"IRAM", "INTERNAL_SRAM", "SRAM"} {
+		if segment, ok := memorySizes["data"].Segments[ramSegmentName]; ok {
+			ramStart = segment.start
+			ramSize = segment.size
 		}
 	}
 
-	ramSize := 0 // for devices with no RAM
-	for _, ramSegmentName := range []string{"IRAM", "INTERNAL_SRAM", "SRAM"} {
-		if segment, ok := memorySizes["data"].Segments[ramSegmentName]; ok {
-			ramSize = segment
+	// Flash that is mapped into the data address space (attiny10, attiny1616,
+	// etc).
+	mappedFlashStart := int64(0)
+	for _, name := range []string{"MAPPED_PROGMEM", "MAPPED_FLASH"} {
+		if segment, ok := memorySizes["data"].Segments[name]; ok {
+			mappedFlashStart = segment.start
 		}
 	}
 
@@ -216,6 +346,35 @@ func readATDF(path string) (*Device, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Process the interrupts to clean up inconsistencies between ATDF files.
+	var interrupts []Interrupt
+	hasResetInterrupt := false
+	for _, intr := range device.Interrupts {
+		name := intr.Name
+		if intr.Instance != "" {
+			// ATDF files for newer chips also have an instance name, which must
+			// be specified to make the interrupt name unique.
+			name = intr.Instance + "_" + name
+		}
+		if name == "RESET" {
+			hasResetInterrupt = true
+		}
+		interrupts = append(interrupts, Interrupt{
+			Index:   intr.Index,
+			Name:    name,
+			Caption: intr.Caption,
+		})
+	}
+	if !hasResetInterrupt {
+		interrupts = append(interrupts, Interrupt{
+			Index: 0,
+			Name:  "RESET",
+		})
+	}
+	sort.SliceStable(interrupts, func(i, j int) bool {
+		return interrupts[i].Index < interrupts[j].Index
+	})
 
 	return &Device{
 		metadata: map[string]interface{}{
@@ -227,11 +386,15 @@ func readATDF(path string) (*Device, error) {
 			"arch":             device.Architecture,
 			"family":           device.Family,
 			"flashSize":        int(flashSize),
+			"ramStart":         ramStart,
 			"ramSize":          ramSize,
+			"mappedFlashStart": mappedFlashStart,
 			"numInterrupts":    len(device.Interrupts),
 		},
-		interrupts:  device.Interrupts,
-		peripherals: peripherals,
+		interrupts: interrupts,
+		types:      types,
+		instances:  instances,
+		oldStyle:   oldStyle,
 	}, nil
 }
 
@@ -254,13 +417,12 @@ func writeGo(outdir string, device *Device) error {
 	t := template.Must(template.New("go").Parse(`// Automatically generated file. DO NOT EDIT.
 // Generated by gen-device-avr.go from {{.metadata.file}}, see {{.metadata.descriptorSource}}
 
-// +build {{.pkgName}},{{.metadata.nameLower}}
+//go:build {{.pkgName}} && {{.metadata.nameLower}}
 
 // {{.metadata.description}}
 package {{.pkgName}}
 
 import (
-	"runtime/interrupt"
 	"runtime/volatile"
 	"unsafe"
 )
@@ -278,31 +440,65 @@ const ({{range .interrupts}}
 	IRQ_max = {{.interruptMax}} // Highest interrupt number on this device.
 )
 
-// Map interrupt numbers to function names.
-// These aren't real calls, they're removed by the compiler.
-var ({{range .interrupts}}
-	_ = interrupt.Register(IRQ_{{.Name}}, "__vector_{{.Name}}"){{end}}
+// Pseudo function call that is replaced by the compiler with the actual
+// functions registered through interrupt.New.
+//go:linkname callHandlers runtime/interrupt.callHandlers
+func callHandlers(num int)
+
+{{- range .interrupts}}
+//export __vector_{{.Name}}
+//go:interrupt
+func interrupt{{.Name}}() {
+	callHandlers(IRQ_{{.Name}})
+}
+{{- end}}
+
+{{if .oldStyle -}}
+// Peripherals.
+var (
+{{- range .instances}}
+	// {{.Caption}}
+	{{range .Type.Registers -}}
+	{{if ne .Name "_" -}}
+	{{.Name}} = (*{{.Type}})(unsafe.Pointer(uintptr(0x{{printf "%x" .Offset}})))
+	{{end -}}
+	{{end -}}
+{{end}})
+{{else}}
+// Peripherals instances.
+var (
+{{- range .instances -}}
+	{{.Name}} = (*{{.Type.Name}}_Type)(unsafe.Pointer(uintptr(0x{{printf "%x" .Address}})))
+	{{- if .Caption}}// {{.Caption}}{{end}}
+{{end -}}
 )
 
-// Peripherals.
-var ({{range .peripherals}}
-	// {{.Caption}}
-{{range .Registers}}{{range .Variants}}	{{.Name}} = (*volatile.Register8)(unsafe.Pointer(uintptr(0x{{printf "%x" .Address}})))
-{{end}}{{end}}{{end}})
+// Peripheral type definitions.
+
+{{range .types}}
+type {{.Name}}_Type struct {
+{{range .Registers -}}
+	{{.Name}} {{.Type}} {{if .Caption}} // {{.Caption}} {{end}}
+{{end -}}
+}
+{{end}}
+{{end}}
 `))
 	err = t.Execute(w, map[string]interface{}{
 		"metadata":     device.metadata,
 		"pkgName":      filepath.Base(strings.TrimRight(outdir, "/")),
 		"interrupts":   device.interrupts,
 		"interruptMax": maxInterruptNum,
-		"peripherals":  device.peripherals,
+		"instances":    device.instances,
+		"types":        device.types,
+		"oldStyle":     device.oldStyle,
 	})
 	if err != nil {
 		return err
 	}
 
 	// Write bitfields.
-	for _, peripheral := range device.peripherals {
+	for _, peripheral := range device.types {
 		// Only write bitfields when there are any.
 		numFields := 0
 		for _, r := range peripheral.Registers {
@@ -317,13 +513,12 @@ var ({{range .peripherals}}
 			if len(register.Bitfields) == 0 {
 				continue
 			}
-			for _, variant := range register.Variants {
-				fmt.Fprintf(w, "\n\t// %s", variant.Name)
-				if register.Caption != "" {
-					fmt.Fprintf(w, ": %s", register.Caption)
-				}
-				fmt.Fprintf(w, "\n")
+			fmt.Fprintf(w, "\n\t// %s", register.Name)
+			if register.Caption != "" {
+				fmt.Fprintf(w, ": %s", register.Caption)
 			}
+			fmt.Fprintf(w, "\n")
+			allBits := map[string]interface{}{}
 			for _, bitfield := range register.Bitfields {
 				if bits.OnesCount(bitfield.Mask) == 1 {
 					fmt.Fprintf(w, "\t%s = 0x%x", bitfield.Name, bitfield.Mask)
@@ -331,19 +526,34 @@ var ({{range .peripherals}}
 						fmt.Fprintf(w, " // %s", bitfield.Caption)
 					}
 					fmt.Fprintf(w, "\n")
+					fmt.Fprintf(w, "\t%s_Msk = 0x%x", bitfield.Name, bitfield.Mask)
+					if len(bitfield.Caption) != 0 {
+						fmt.Fprintf(w, " // %s", bitfield.Caption)
+					}
+					fmt.Fprintf(w, "\n")
+					allBits[bitfield.Name] = nil
 				} else {
 					n := 0
 					for i := uint(0); i < 8; i++ {
 						if (bitfield.Mask>>i)&1 == 0 {
 							continue
 						}
-						fmt.Fprintf(w, "\t%s%d = 0x%x", bitfield.Name, n, 1<<i)
-						if len(bitfield.Caption) != 0 {
-							fmt.Fprintf(w, " // %s", bitfield.Caption)
+						name := fmt.Sprintf("%s%d", bitfield.Name, n)
+						if _, ok := allBits[name]; !ok {
+							fmt.Fprintf(w, "\t%s = 0x%x", name, 1<<i)
+							if len(bitfield.Caption) != 0 {
+								fmt.Fprintf(w, " // %s", bitfield.Caption)
+							}
+							fmt.Fprintf(w, "\n")
+							allBits[name] = nil
 						}
 						n++
-						fmt.Fprintf(w, "\n")
 					}
+					fmt.Fprintf(w, "\t%s_Msk = 0x%x", bitfield.Name, bitfield.Mask)
+					if len(bitfield.Caption) != 0 {
+						fmt.Fprintf(w, " // %s", bitfield.Caption)
+					}
+					fmt.Fprintf(w, "\n")
 				}
 			}
 		}
@@ -379,7 +589,7 @@ __vector_default:
 .endm
 
 ; The interrupt vector of this device. Must be placed at address 0 by the linker.
-.section .vectors
+.section .vectors, "a", %progbits
 .global  __vectors
 `))
 	err = t.Execute(out, device.metadata)
@@ -429,6 +639,10 @@ func writeLD(outdir string, device *Device) error {
 /* Generated by gen-device-avr.go from {{.file}}, see {{.descriptorSource}} */
 
 __flash_size = 0x{{printf "%x" .flashSize}};
+{{if .mappedFlashStart -}}
+__mapped_flash_start = 0x{{printf "%x" .mappedFlashStart}};
+{{end -}}
+__ram_start = 0x{{printf "%x" .ramStart}};
 __ram_size   = 0x{{printf "%x" .ramSize}};
 __num_isrs   = {{.numInterrupts}};
 `))

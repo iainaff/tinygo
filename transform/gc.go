@@ -1,8 +1,6 @@
 package transform
 
 import (
-	"math/big"
-
 	"tinygo.org/x/go-llvm"
 )
 
@@ -19,7 +17,8 @@ func MakeGCStackSlots(mod llvm.Module) bool {
 		}
 		stackChainStart := mod.NamedGlobal("runtime.stackChainStart")
 		if !stackChainStart.IsNil() {
-			stackChainStart.SetInitializer(llvm.ConstNull(stackChainStart.Type().ElementType()))
+			stackChainStart.SetLinkage(llvm.InternalLinkage)
+			stackChainStart.SetInitializer(llvm.ConstNull(stackChainStart.GlobalValueType()))
 			stackChainStart.SetGlobalConstant(true)
 		}
 		return false
@@ -32,7 +31,9 @@ func MakeGCStackSlots(mod llvm.Module) bool {
 
 	ctx := mod.Context()
 	builder := ctx.NewBuilder()
+	defer builder.Dispose()
 	targetData := llvm.NewTargetData(mod.DataLayout())
+	defer targetData.Dispose()
 	uintptrType := ctx.IntType(targetData.PointerSize() * 8)
 
 	// Look at *all* functions to see whether they are free of function pointer
@@ -94,7 +95,8 @@ func MakeGCStackSlots(mod llvm.Module) bool {
 		}
 		return false
 	}
-	stackChainStartType := stackChainStart.Type().ElementType()
+	stackChainStart.SetLinkage(llvm.InternalLinkage)
+	stackChainStartType := stackChainStart.GlobalValueType()
 	stackChainStart.SetInitializer(llvm.ConstNull(stackChainStartType))
 
 	// Iterate until runtime.trackPointer has no uses left.
@@ -137,24 +139,38 @@ func MakeGCStackSlots(mod llvm.Module) bool {
 		}
 
 		// Determine what to do with each call.
-		var allocas, pointers []llvm.Value
+		var pointers []llvm.Value
 		for _, call := range calls {
 			ptr := call.Operand(0)
 			call.EraseFromParentAsInstruction()
-			if ptr.IsAInstruction().IsNil() {
-				continue
-			}
 
 			// Some trivial optimizations.
 			if ptr.IsAInstruction().IsNil() {
 				continue
 			}
 			switch ptr.InstructionOpcode() {
-			case llvm.PHI, llvm.GetElementPtr:
-				// These values do not create new values: the values already
-				// existed locally in this function so must have been tracked
-				// already.
-				continue
+			case llvm.GetElementPtr:
+				// Check for all zero offsets.
+				// Sometimes LLVM rewrites bitcasts to zero-index GEPs, and we still need to track the GEP.
+				n := ptr.OperandsCount()
+				var hasOffset bool
+				for i := 1; i < n; i++ {
+					offset := ptr.Operand(i)
+					if offset.IsAConstantInt().IsNil() || offset.ZExtValue() != 0 {
+						hasOffset = true
+						break
+					}
+				}
+
+				if hasOffset {
+					// These values do not create new values: the values already
+					// existed locally in this function so must have been tracked
+					// already.
+					continue
+				}
+			case llvm.PHI:
+				// While the value may have already been tracked, it may be overwritten in a loop.
+				// Therefore, a second copy must be created to ensure that it is tracked over the entirety of its lifetime.
 			case llvm.ExtractValue, llvm.BitCast:
 				// These instructions do not create new values, but their
 				// original value may not be tracked. So keep tracking them for
@@ -170,16 +186,15 @@ func MakeGCStackSlots(mod llvm.Module) bool {
 				// be optimized if needed.
 			}
 
-			if !ptr.IsAAllocaInst().IsNil() {
-				if typeHasPointers(ptr.Type().ElementType()) {
-					allocas = append(allocas, ptr)
-				}
-			} else {
-				pointers = append(pointers, ptr)
+			if ptr := stripPointerCasts(ptr); !ptr.IsAAllocaInst().IsNil() {
+				// Allocas don't need to be tracked because they are allocated
+				// on the C stack which is scanned separately.
+				continue
 			}
+			pointers = append(pointers, ptr)
 		}
 
-		if len(allocas) == 0 && len(pointers) == 0 {
+		if len(pointers) == 0 {
 			// This function does not need to keep track of stack pointers.
 			continue
 		}
@@ -188,9 +203,6 @@ func MakeGCStackSlots(mod llvm.Module) bool {
 		fields := []llvm.Type{
 			stackChainStartType, // Pointer to parent frame.
 			uintptrType,         // Number of elements in this frame.
-		}
-		for _, alloca := range allocas {
-			fields = append(fields, alloca.Type().ElementType())
 		}
 		for _, ptr := range pointers {
 			fields = append(fields, ptr.Type())
@@ -203,176 +215,60 @@ func MakeGCStackSlots(mod llvm.Module) bool {
 		initialStackObject := llvm.ConstNull(stackObjectType)
 		numSlots := (targetData.TypeAllocSize(stackObjectType) - uint64(targetData.PointerSize())*2) / uint64(targetData.ABITypeAlignment(uintptrType))
 		numSlotsValue := llvm.ConstInt(uintptrType, numSlots, false)
-		initialStackObject = llvm.ConstInsertValue(initialStackObject, numSlotsValue, []uint32{1})
+		initialStackObject = builder.CreateInsertValue(initialStackObject, numSlotsValue, 1, "")
 		builder.CreateStore(initialStackObject, stackObject)
 
 		// Update stack start.
-		parent := builder.CreateLoad(stackChainStart, "")
-		gep := builder.CreateGEP(stackObject, []llvm.Value{
+		parent := builder.CreateLoad(stackChainStartType, stackChainStart, "")
+		gep := builder.CreateGEP(stackObjectType, stackObject, []llvm.Value{
 			llvm.ConstInt(ctx.Int32Type(), 0, false),
 			llvm.ConstInt(ctx.Int32Type(), 0, false),
 		}, "")
 		builder.CreateStore(parent, gep)
-		stackObjectCast := builder.CreateBitCast(stackObject, stackChainStartType, "")
-		builder.CreateStore(stackObjectCast, stackChainStart)
+		builder.CreateStore(stackObject, stackChainStart)
 
-		// Replace all independent allocas with GEPs in the stack object.
-		for i, alloca := range allocas {
-			gep := builder.CreateGEP(stackObject, []llvm.Value{
+		// Do a store to the stack object after each new pointer that is created.
+		pointerStores := make(map[llvm.Value]struct{})
+		for i, ptr := range pointers {
+			// Insert the store after the pointer value is created.
+			insertionPoint := llvm.NextInstruction(ptr)
+			for !insertionPoint.IsAPHINode().IsNil() {
+				// PHI nodes are required to be at the start of the block.
+				// Insert after the last PHI node.
+				insertionPoint = llvm.NextInstruction(insertionPoint)
+			}
+			builder.SetInsertPointBefore(insertionPoint)
+
+			// Extract a pointer to the appropriate section of the stack object.
+			gep := builder.CreateGEP(stackObjectType, stackObject, []llvm.Value{
 				llvm.ConstInt(ctx.Int32Type(), 0, false),
 				llvm.ConstInt(ctx.Int32Type(), uint64(2+i), false),
 			}, "")
-			alloca.ReplaceAllUsesWith(gep)
-			alloca.EraseFromParentAsInstruction()
-		}
 
-		// Do a store to the stack object after each new pointer that is created.
-		for i, ptr := range pointers {
-			builder.SetInsertPointBefore(llvm.NextInstruction(ptr))
-			gep := builder.CreateGEP(stackObject, []llvm.Value{
-				llvm.ConstInt(ctx.Int32Type(), 0, false),
-				llvm.ConstInt(ctx.Int32Type(), uint64(2+len(allocas)+i), false),
-			}, "")
-			builder.CreateStore(ptr, gep)
+			// Store the pointer into the stack slot.
+			store := builder.CreateStore(ptr, gep)
+			pointerStores[store] = struct{}{}
 		}
 
 		// Make sure this stack object is popped from the linked list of stack
 		// objects at return.
 		for _, ret := range returns {
+			// Check for any tail calls at this return.
+			prev := llvm.PrevInstruction(ret)
+			if !prev.IsNil() && !prev.IsABitCastInst().IsNil() {
+				// A bitcast can appear before a tail call, so skip backwards more.
+				prev = llvm.PrevInstruction(prev)
+			}
+			if !prev.IsNil() && !prev.IsACallInst().IsNil() {
+				// This is no longer a tail call.
+				prev.SetTailCall(false)
+			}
 			builder.SetInsertPointBefore(ret)
 			builder.CreateStore(parent, stackChainStart)
 		}
 	}
 
 	return true
-}
-
-// AddGlobalsBitmap performs a few related functions. It is needed for scanning
-// globals on platforms where the .data/.bss section is not easily accessible by
-// the GC, and thus all globals that contain pointers must be made reachable by
-// the GC in some other way.
-//
-// First, it scans all globals, and bundles all globals that contain a pointer
-// into one large global (updating all uses in the process). Then it creates a
-// bitmap (bit vector) to locate all the pointers in this large global. This
-// bitmap allows the GC to know in advance where exactly all the pointers live
-// in the large globals bundle, to avoid false positives.
-func AddGlobalsBitmap(mod llvm.Module) bool {
-	if mod.NamedGlobal("runtime.trackedGlobalsStart").IsNil() {
-		return false // nothing to do: no GC in use
-	}
-
-	ctx := mod.Context()
-	targetData := llvm.NewTargetData(mod.DataLayout())
-	uintptrType := ctx.IntType(targetData.PointerSize() * 8)
-
-	// Collect all globals that contain pointers (and thus must be scanned by
-	// the GC).
-	var trackedGlobals []llvm.Value
-	var trackedGlobalTypes []llvm.Type
-	for global := mod.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
-		if global.IsDeclaration() {
-			continue
-		}
-		typ := global.Type().ElementType()
-		ptrs := getPointerBitmap(targetData, typ, global.Name())
-		if ptrs.BitLen() == 0 {
-			continue
-		}
-		trackedGlobals = append(trackedGlobals, global)
-		trackedGlobalTypes = append(trackedGlobalTypes, typ)
-	}
-
-	// Make a new global that bundles all existing globals, and remove the
-	// existing globals. All uses of the previous independent globals are
-	// replaced with a GEP into the new globals bundle.
-	globalsBundleType := ctx.StructType(trackedGlobalTypes, false)
-	globalsBundle := llvm.AddGlobal(mod, globalsBundleType, "tinygo.trackedGlobals")
-	globalsBundle.SetLinkage(llvm.InternalLinkage)
-	globalsBundle.SetUnnamedAddr(true)
-	initializer := llvm.Undef(globalsBundleType)
-	for i, global := range trackedGlobals {
-		initializer = llvm.ConstInsertValue(initializer, global.Initializer(), []uint32{uint32(i)})
-		gep := llvm.ConstGEP(globalsBundle, []llvm.Value{
-			llvm.ConstInt(ctx.Int32Type(), 0, false),
-			llvm.ConstInt(ctx.Int32Type(), uint64(i), false),
-		})
-		global.ReplaceAllUsesWith(gep)
-		global.EraseFromParentAsGlobal()
-	}
-	globalsBundle.SetInitializer(initializer)
-
-	// Update trackedGlobalsStart, which points to the globals bundle.
-	trackedGlobalsStart := llvm.ConstPtrToInt(globalsBundle, uintptrType)
-	mod.NamedGlobal("runtime.trackedGlobalsStart").SetInitializer(trackedGlobalsStart)
-
-	// Update trackedGlobalsLength, which contains the length (in words) of the
-	// globals bundle.
-	alignment := targetData.PrefTypeAlignment(llvm.PointerType(ctx.Int8Type(), 0))
-	trackedGlobalsLength := llvm.ConstInt(uintptrType, targetData.TypeAllocSize(globalsBundleType)/uint64(alignment), false)
-	mod.NamedGlobal("runtime.trackedGlobalsLength").SetInitializer(trackedGlobalsLength)
-
-	// Create a bitmap (a new global) that stores for each word in the globals
-	// bundle whether it contains a pointer. This allows globals to be scanned
-	// precisely: no non-pointers will be considered pointers if the bit pattern
-	// looks like one.
-	// This code assumes that pointers are self-aligned. For example, that a
-	// 32-bit (4-byte) pointer is also aligned to 4 bytes.
-	bitmapBytes := getPointerBitmap(targetData, globalsBundleType, "globals bundle").Bytes()
-	bitmapValues := make([]llvm.Value, len(bitmapBytes))
-	for i, b := range bitmapBytes {
-		bitmapValues[len(bitmapBytes)-i-1] = llvm.ConstInt(ctx.Int8Type(), uint64(b), false)
-	}
-	bitmapArray := llvm.ConstArray(ctx.Int8Type(), bitmapValues)
-	bitmapNew := llvm.AddGlobal(mod, bitmapArray.Type(), "runtime.trackedGlobalsBitmap.tmp")
-	bitmapOld := mod.NamedGlobal("runtime.trackedGlobalsBitmap")
-	bitmapOld.ReplaceAllUsesWith(llvm.ConstBitCast(bitmapNew, bitmapOld.Type()))
-	bitmapNew.SetInitializer(bitmapArray)
-	bitmapNew.SetName("runtime.trackedGlobalsBitmap")
-
-	return true // the IR was changed
-}
-
-// getPointerBitmap scans the given LLVM type for pointers and sets bits in a
-// bigint at the word offset that contains a pointer. This scan is recursive.
-func getPointerBitmap(targetData llvm.TargetData, typ llvm.Type, name string) *big.Int {
-	alignment := targetData.PrefTypeAlignment(llvm.PointerType(typ.Context().Int8Type(), 0))
-	switch typ.TypeKind() {
-	case llvm.IntegerTypeKind, llvm.FloatTypeKind, llvm.DoubleTypeKind:
-		return big.NewInt(0)
-	case llvm.PointerTypeKind:
-		return big.NewInt(1)
-	case llvm.StructTypeKind:
-		ptrs := big.NewInt(0)
-		for i, subtyp := range typ.StructElementTypes() {
-			subptrs := getPointerBitmap(targetData, subtyp, name)
-			if subptrs.BitLen() == 0 {
-				continue
-			}
-			offset := targetData.ElementOffset(typ, i)
-			if offset%uint64(alignment) != 0 {
-				panic("precise GC: global contains unaligned pointer: " + name)
-			}
-			subptrs.Lsh(subptrs, uint(offset)/uint(alignment))
-			ptrs.Or(ptrs, subptrs)
-		}
-		return ptrs
-	case llvm.ArrayTypeKind:
-		subtyp := typ.ElementType()
-		subptrs := getPointerBitmap(targetData, subtyp, name)
-		ptrs := big.NewInt(0)
-		if subptrs.BitLen() == 0 {
-			return ptrs
-		}
-		elementSize := targetData.TypeAllocSize(subtyp)
-		for i := 0; i < typ.ArrayLength(); i++ {
-			ptrs.Lsh(ptrs, uint(elementSize)/uint(alignment))
-			ptrs.Or(ptrs, subptrs)
-		}
-		return ptrs
-	default:
-		panic("unknown type kind of global: " + name)
-	}
 }
 
 // markParentFunctions traverses all parent function calls (recursively) and

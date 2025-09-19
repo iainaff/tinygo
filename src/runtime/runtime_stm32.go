@@ -1,13 +1,16 @@
-// +build stm32
+//go:build stm32
 
 package runtime
 
-type timeUnit int64
+import "device/arm"
 
-//go:export Reset_Handler
+//export Reset_Handler
 func main() {
 	preinit()
-	initAll()
-	callMain()
-	abort()
+	run()
+	exit(0)
+}
+
+func waitForEvents() {
+	arm.Asm("wfe")
 }

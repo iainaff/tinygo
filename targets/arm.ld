@@ -9,12 +9,18 @@ SECTIONS
     .text :
     {
         KEEP(*(.isr_vector))
+        KEEP(*(.after_isr_vector)) /* for the RP2350 */
         *(.text)
-        *(.text*)
+        *(.text.*)
         *(.rodata)
-        *(.rodata*)
+        *(.rodata.*)
         . = ALIGN(4);
     } >FLASH_TEXT
+
+    .tinygo_stacksizes :
+    {
+        *(.tinygo_stacksizes)
+    } > FLASH_TEXT
 
     /* Put the stack at the bottom of RAM, so that the application will
      * crash on stack overflow instead of silently corrupting memory.
@@ -26,6 +32,14 @@ SECTIONS
         _stack_top = .;
     } >RAM
 
+    /* Stack for second core (core 1), if there is one. */
+    .stack1 (NOLOAD) :
+    {
+        . = ALIGN(4);
+        . += DEFINED(__num_stacks) && __num_stacks >= 2 ? _stack_size : 0;
+        _stack1_top = .;
+    } >RAM
+
     /* Start address (in flash) of .data, used by startup code. */
     _sidata = LOADADDR(.data);
 
@@ -35,7 +49,9 @@ SECTIONS
         . = ALIGN(4);
         _sdata = .;        /* used by startup code */
         *(.data)
-        *(.data*)
+        *(.data.*)
+        . = ALIGN(4);
+        *(.ramfuncs*)      /* Functions that must execute from RAM */
         . = ALIGN(4);
         _edata = .;        /* used by startup code */
     } >RAM AT>FLASH_TEXT
@@ -46,7 +62,7 @@ SECTIONS
         . = ALIGN(4);
         _sbss = .;         /* used by startup code */
         *(.bss)
-        *(.bss*)
+        *(.bss.*)
         *(COMMON)
         . = ALIGN(4);
         _ebss = .;         /* used by startup code */
@@ -64,3 +80,7 @@ _heap_start = _ebss;
 _heap_end = ORIGIN(RAM) + LENGTH(RAM);
 _globals_start = _sdata;
 _globals_end = _ebss;
+
+/* For the flash API */
+__flash_data_start = LOADADDR(.data) + SIZEOF(.data);
+__flash_data_end = ORIGIN(FLASH_TEXT) + LENGTH(FLASH_TEXT);

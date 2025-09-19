@@ -4,14 +4,8 @@ import (
 	"runtime/volatile"
 )
 
-const bufferSize = 128
-
 // RingBuffer is ring buffer implementation inspired by post at
 // https://www.embeddedrelated.com/showthread/comp.arch.embedded/77084-1.php
-//
-// It has some limitations currently due to how "volatile" variables that are
-// members of a struct are not compiled correctly by TinyGo.
-// See https://github.com/tinygo-org/tinygo/issues/151 for details.
 type RingBuffer struct {
 	rxbuffer [bufferSize]volatile.Register8
 	head     volatile.Register8
@@ -47,4 +41,10 @@ func (rb *RingBuffer) Get() (byte, bool) {
 		return rb.rxbuffer[rb.tail.Get()%bufferSize].Get(), true
 	}
 	return 0, false
+}
+
+// Clear resets the head and tail pointer to zero.
+func (rb *RingBuffer) Clear() {
+	rb.head.Set(0)
+	rb.tail.Set(0)
 }

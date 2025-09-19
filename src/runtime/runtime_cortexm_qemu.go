@@ -1,4 +1,4 @@
-// +build cortexm,qemu
+//go:build cortexm && qemu
 
 package runtime
 
@@ -11,22 +11,24 @@ import (
 	"unsafe"
 )
 
-type timeUnit int64
-
-const tickMicros = 1
-
 var timestamp timeUnit
 
-//go:export Reset_Handler
+//export Reset_Handler
 func main() {
 	preinit()
-	initAll()
-	callMain()
-	arm.SemihostingCall(arm.SemihostingReportException, arm.SemihostingApplicationExit)
-	abort()
+	run()
+
+	// Signal successful exit.
+	exit(0)
 }
 
-const asyncScheduler = false
+func ticksToNanoseconds(ticks timeUnit) int64 {
+	return int64(ticks)
+}
+
+func nanosecondsToTicks(ns int64) timeUnit {
+	return timeUnit(ns)
+}
 
 func sleepTicks(d timeUnit) {
 	// TODO: actually sleep here for the given time.
@@ -42,4 +44,36 @@ var stdoutWrite = (*volatile.Register8)(unsafe.Pointer(uintptr(0x4000c000)))
 
 func putchar(c byte) {
 	stdoutWrite.Set(uint8(c))
+}
+
+func getchar() byte {
+	// dummy, TODO
+	return 0
+}
+
+func buffered() int {
+	// dummy, TODO
+	return 0
+}
+
+func waitForEvents() {
+	arm.Asm("wfe")
+}
+
+func abort() {
+	exit(1)
+}
+
+func exit(code int) {
+	// Exit QEMU.
+	if code == 0 {
+		arm.SemihostingCall(arm.SemihostingReportException, arm.SemihostingApplicationExit)
+	} else {
+		arm.SemihostingCall(arm.SemihostingReportException, arm.SemihostingRunTimeErrorUnknown)
+	}
+
+	// Lock up forever (should be unreachable).
+	for {
+		arm.Asm("wfi")
+	}
 }

@@ -1,4 +1,6 @@
+#include <math.h>
 #include "main.h"
+#include <stdio.h>
 
 int global = 3;
 bool globalBool = 1;
@@ -20,6 +22,12 @@ int globalUnionSize = sizeof(globalUnion);
 option_t globalOption = optionG;
 bitfield_t globalBitfield = {244, 15, 1, 2, 47, 5};
 
+int cflagsConstant = SOME_CONSTANT;
+
+int smallEnumWidth = sizeof(option2_t);
+
+char globalChars[] = {2, 0, 4, 8};
+
 int fortytwo() {
 	return 42;
 }
@@ -30,6 +38,14 @@ int add(int a, int b) {
 
 int doCallback(int a, int b, binop_t callback) {
 	return callback(a, b);
+}
+
+int variadic0() {
+	return 1;
+}
+
+int variadic2(int x, int y, ...) {
+	return x * y;
 }
 
 void store(int value, int *ptr) {
@@ -48,4 +64,21 @@ void unionSetData(short f0, short f1, short f2) {
 	globalUnion.data[0] = 5;
 	globalUnion.data[1] = 8;
 	globalUnion.data[2] = 1;
+}
+
+void arraydecay(int buf1[5], int buf2[3][8], int buf3[4][7][2]) {
+	// Do nothing.
+}
+
+double doSqrt(double x) {
+	return sqrt(x);
+}
+
+void printf_single_int(char *format, int arg) {
+	printf(format, arg);
+}
+
+int set_errno(int err) {
+	errno = err;
+	return -1;
 }

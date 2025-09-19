@@ -1,4 +1,4 @@
-// +build pca10040
+//go:build pca10040
 
 package machine
 
@@ -7,21 +7,23 @@ const HasLowFrequencyCrystal = true
 
 // LEDs on the PCA10040 (nRF52832 dev board)
 const (
-	LED  Pin = LED1
 	LED1 Pin = 17
 	LED2 Pin = 18
 	LED3 Pin = 19
 	LED4 Pin = 20
+	LED  Pin = LED1
 )
 
 // Buttons on the PCA10040 (nRF52832 dev board)
 const (
-	BUTTON  Pin = BUTTON1
 	BUTTON1 Pin = 13
 	BUTTON2 Pin = 14
 	BUTTON3 Pin = 15
 	BUTTON4 Pin = 16
+	BUTTON  Pin = BUTTON1
 )
+
+var DefaultUART = UART0
 
 // UART pins for NRF52840-DK
 const (
@@ -47,7 +49,7 @@ const (
 
 // SPI pins
 const (
-	SPI0_SCK_PIN  Pin = 25
-	SPI0_MOSI_PIN Pin = 23
-	SPI0_MISO_PIN Pin = 24
+	SPI0_SCK_PIN Pin = 25
+	SPI0_SDO_PIN Pin = 23
+	SPI0_SDI_PIN Pin = 24
 )

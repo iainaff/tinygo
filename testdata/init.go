@@ -13,6 +13,8 @@ func main() {
 	println("v5:", len(v5), v5 == nil)
 	println("v6:", v6)
 	println("v7:", cap(v7), string(v7))
+	println("v8:", v8)
+	println("v9:", len(v9), v9[0], v9[1], v9[2])
 
 	println(uint8SliceSrc[0])
 	println(uint8SliceDst[0])
@@ -35,12 +37,59 @@ var (
 	v5 = map[string]int{}
 	v6 = float64(v1) < 2.6
 	v7 = []byte("foo")
+	v8 string
+	v9 []int
 
 	uint8SliceSrc = []uint8{3, 100}
 	uint8SliceDst []uint8
-	intSliceSrc = []int16{5, 123, 1024}
-	intSliceDst []int16
+	intSliceSrc   = []int16{5, 123, 1024}
+	intSliceDst   []int16
+
+	someList    *linkedList
+	someBigList *bigLinkedList
 )
+
+type linkedList struct {
+	prev *linkedList
+	next *linkedList
+	v    int // arbitrary value (don't care)
+}
+
+func init() {
+	someList = &linkedList{
+		v: -1,
+	}
+	for i := 0; i < 3; i++ {
+		prev := someList
+		someList = &linkedList{
+			v:    i,
+			prev: prev,
+		}
+		prev.next = someList
+	}
+}
+
+type bigLinkedList struct {
+	prev *bigLinkedList
+	next *bigLinkedList
+	v    int
+	buf  [100]*int
+}
+
+func init() {
+	// Create a circular reference.
+	someBigList = &bigLinkedList{
+		v: -1,
+	}
+	for i := 0; i < 3; i++ {
+		prev := someBigList
+		someBigList = &bigLinkedList{
+			v:    i,
+			prev: prev,
+		}
+		prev.next = someBigList
+	}
+}
 
 func init() {
 	uint8SliceDst = make([]uint8, len(uint8SliceSrc))
@@ -48,4 +97,26 @@ func init() {
 
 	intSliceDst = make([]int16, len(intSliceSrc))
 	copy(intSliceDst, intSliceSrc)
+
+	v8 = sliceString("foobarbaz", 3, 8)
+	v9 = sliceSlice([]int{0, 1, 2, 3, 4, 5}, 2, 5)
+}
+
+func sliceString(s string, start, end int) string {
+	return s[start:end]
+}
+
+func sliceSlice(s []int, start, end int) []int {
+	return s[start:end]
+}
+
+type outside struct{}
+
+func init() {
+	_, _ = any(0).(interface{ DoesNotExist() })
+	_, _ = any("").(interface{ DoesNotExist() })
+	_, _ = any(outside{}).(interface{ DoesNotExist() })
+
+	type inside struct{}
+	_, _ = any(inside{}).(interface{ DoesNotExist() })
 }

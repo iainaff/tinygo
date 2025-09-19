@@ -1,6 +1,7 @@
 // Generic Cortex-M interrupt vector.
 // This vector is used by the Cortex-M QEMU target.
 
+.cfi_sections .debug_frame
 .syntax unified
 
 // This is the default handler for interrupts, if triggered but not defined.
@@ -8,8 +9,11 @@
 .global  Default_Handler
 .type    Default_Handler, %function
 Default_Handler:
+    .cfi_startproc
     wfe
     b    Default_Handler
+    .cfi_endproc
+.size Default_Handler, .-Default_Handler
 
 // Avoid the need for repeated .weak and .set instructions.
 .macro IRQ handler
@@ -19,6 +23,7 @@ Default_Handler:
 
 .section .isr_vector, "a", %progbits
 .global  __isr_vector
+__isr_vector:
     // Interrupt vector as defined by Cortex-M, starting with the stack top.
     // On reset, SP is initialized with *0x0 and PC is loaded with *0x4, loading
     // _stack_top and Reset_Handler.
@@ -50,3 +55,5 @@ Default_Handler:
     IRQ DebugMon_Handler
     IRQ PendSV_Handler
     IRQ SysTick_Handler
+
+.size __isr_vector, .-__isr_vector
